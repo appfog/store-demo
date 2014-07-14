@@ -88,7 +88,14 @@
  *   $db_url = 'mysqli://username:password@localhost/databasename';
  *   $db_url = 'pgsql://username:password@localhost/databasename';
  */
-$db_url = 'mysql://drupaluser:password@localhost/drupal';
+//$db_url = 'mysql://drupaluser:password@localhost/drupal';
+
+$services = getenv("VCAP_SERVICES");
+$services_json = json_decode($services,true);
+$mysql_config = $services_json["mysql-5.1"][0]["credentials"];
+
+$db_url = $mysql_config['driver'].'://'.$mysql_config['user'].'@'.$mysql_config['hostname'].'/'.$mysql_config['database'];
+
 $db_prefix = '';
 
 /**
