@@ -1,0 +1,140 @@
+<?php
+// $Id: category_display.install,v 1.11 2009/12/02 00:04:30 jaza Exp $
+
+/**
+ * @file
+ * Update file for the category_display module. All functions in this
+ * file are implementations of hook_update_N(), unless indicated otherwise.
+ */
+
+/**
+ * Implementation of hook_install().
+ */
+function category_display_install() {
+  drupal_install_schema('category_display');
+  db_query("UPDATE {system} SET weight = 9 WHERE name = 'category_display'");
+}
+
+/**
+ * Implementation of hook_uninstall().
+ */
+function category_display_uninstall() {
+  drupal_uninstall_schema('category_display');
+}
+
+/**
+ * Implementation of hook_schema().
+ */
+function category_display_schema() {
+  $schema['category_display'] = array(
+    'description' => 'Stores display settings for containers.',
+    'fields' => array(
+      'cid' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'Primary Key: The {category}.cid of the container.',
+      ),
+      'navlinks' => array(
+        'type' => 'int',
+        'size' => 'tiny',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'Whether or not navigation links (prev/next/up) should be shown on category pages within this container.',
+      ),
+      'toc_for_cats' => array(
+        'type' => 'int',
+        'size' => 'tiny',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'Whether or not the Table-of-contents tree should be shown on category pages within this container.',
+      ),
+      'toc_depth' => array(
+        'type' => 'int',
+        'size' => 'small',
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'Depth of the Table-of-contents tree (-1 for infinite).',
+      ),
+      'toc_nodecount' => array(
+        'type' => 'int',
+        'size' => 'tiny',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'Whether or not the Table-of-contents tree should show counts of assigned nodes.',
+      ),
+      'nodelinks' => array(
+        'type' => 'int',
+        'size' => 'tiny',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'Whether or not to show links to assigned categories on viewed nodes.',
+      ),
+      'show_listing' => array(
+        'type' => 'int',
+        'size' => 'tiny',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'Whether or not to show lists of assigned content on category pages within this container.',
+      ),
+      'emptymsg' => array(
+        'type' => 'int',
+        'size' => 'tiny',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'Whether or not to show a message, if no content is assigned to a category.',
+      ),
+      'legacy_redirect' => array(
+        'type' => 'int',
+        'size' => 'tiny',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'Whether or not to redirect from legacy paths (category/xyz) to proper category pages (node/xyz).',
+      ),
+    ),
+    'primary key' => array('cid'),
+  );
+
+  return $schema;
+}
+
+/**
+ * Drupal 6 updates for the category_display module.
+ */
+function category_display_update_6000() {
+  $ret = array();
+
+  db_drop_field($ret, 'category_display', 'navlinks_before');
+  db_drop_field($ret, 'category_display', 'navlinks_after');
+  db_drop_field($ret, 'category_display', 'desc_as_body');
+  
+  db_change_field($ret, 'category_display', 'toc_depth', 'toc_depth', array('type' => 'int', 'size' => 'small', 'not null' => TRUE, 'default' => 0));
+
+  return $ret;
+}
+
+/**
+ * Add a new column for 'legacy_redirect' setting.
+ */
+function category_display_update_6001() {
+  $ret = array();
+
+  $new_field = array(
+    'type' => 'int',
+    'size' => 'tiny',
+    'unsigned' => TRUE,
+    'not null' => TRUE,
+    'default' => 0,
+  );
+  db_add_field($ret, 'category_display', 'legacy_redirect', $new_field);
+
+  return $ret;
+}

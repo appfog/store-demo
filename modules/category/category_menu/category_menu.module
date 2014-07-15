@@ -1,0 +1,1156 @@
+<?php
+// $Id: category_menu.module,v 1.57 2009/12/02 00:09:58 jaza Exp $
+
+/**
+ * @file
+ * Creates and manages a set of menu items that correspond to the site's
+ * category hierarchy.
+ */
+
+/**
+ * Implementation of hook_help().
+ */
+function category_menu_help($section) {
+  switch ($section) {
+    case 'admin/help#category_menu':
+      return '<p>'. t("The category menu module creates and manages a set of menu items that correspond to your site's category hierarchy. Breadcrumbs for category and container pages (and, optionally, assigned node pages) will reflect the managed menu items. You can also display the menu as a block on your site.") .'</p>';
+  }
+}
+
+/**
+ * Implementation of hook_menu().
+ */
+function category_menu_menu() {
+  $items = array();
+
+  $items['category_menu/js/form'] = array(
+    'page callback' => 'category_menu_form_update',
+    'access arguments' => array('access content'),
+    'type' => MENU_CALLBACK,
+    'file' => 'category_menu.pages.inc',
+  );
+  $items['category_menu/js/form_parent_link'] = array(
+    'page callback' => 'category_menu_form_parent_link_update',
+    'access arguments' => array('access content'),
+    'type' => MENU_CALLBACK,
+    'file' => 'category_menu.pages.inc',
+  );
+
+  return $items;
+}
+
+/**
+ * Implementation of hook_nodeapi().
+ */
+function category_menu_nodeapi(&$node, $op, $teaser, $page) {
+  switch ($op) {
+    case 'load':
+      $output = array();
+      $behavior = variable_get('category_behavior_'. $node->type, 0);
+
+      if (!empty($behavior) && $behavior == 'container') {
+        $output['category_menu'] = (array) category_menu_get_container($node->nid);
+      }
+
+      // Note - we cannot use category_menu_link_load() because it will call node_load()
+      $menu_map = category_menu_map_load_by_nid($node->nid);
+      if (!empty($menu_map)) {
+        $output['category_menu_map'] = $menu_map;
+      }
+
+      return $output;
+
+    case 'view':
+      if (!$teaser && $page) {
+        if (!empty($node->category_menu_map['mlid']) && $node->build_mode == NODE_BUILD_NORMAL) {
+          menu_set_active_trail(category_menu_build_active_trail($node->category_menu_map));
+          menu_set_active_menu_name($node->category_menu_map['menu_name']);
+        }
+      }
+      break;
+
+    case 'prepare':
+      $behavior = variable_get('category_behavior_'. $node->type, 0);
+      if (!empty($behavior) && $behavior == 'container') {
+        // Prepare defaults for the add/edit form.
+        if (empty($node->category_menu)) {
+          $node->category_menu = array();
+        }
+      }
+      // No break: Remove menu-on-the-fly information retrieved by core menu module (just in case)
+
+    case 'presave':
+      // Remove any menu-on-the-fly information prior to saving a node,
+      // so that core menu module doesn't save any menu items.
+      unset($node->menu);
+      break;
+
+    case 'insert':
+    case 'update':
+      $behavior = variable_get('category_behavior_'. $node->type, 0);
+      if (!empty($behavior) && $behavior == 'container') {
+        // On updates of already populated containers, show a reminder to refresh
+        // site's data through category_resave, if critical menu settings changed.
+        if ($op == 'update' && db_fetch_array(db_query("SELECT * FROM {category} WHERE cnid = %d", $node->nid))) {
+          $old_settings = (array) category_menu_get_container($node->nid);
+          if (!empty($node->category_menu['links_for_nodes'])) {
+            $node->category_menu['links_for_nodes'] = array_filter($node->category_menu['links_for_nodes']);
+          }
+          foreach (array('links_for_cats', 'expanded_for_cats', 'menu_name', 'links_for_nodes') as $key) {
+            if (isset($old_settings[$key]) && $old_settings[$key] != $node->category_menu[$key]) {
+              drupal_set_message(t('Your changes affected behavior of generated menu links. To apply these changes properly, you need to refresh categories and/or nodes in this container now. The <em>category resave</em> module offers an easy way to perform this operation on existing content.'));
+              break;
+            }
+          }
+        }
+        category_menu_save_container($node);
+      }
+
+      category_menu_map_save($node);
+      break;
+
+    case 'delete':
+      $behavior = variable_get('category_behavior_'. $node->type, 0);
+      if (!empty($behavior) && $behavior == 'container') {
+        category_menu_del_container($node->nid);
+      }
+
+      category_menu_map_delete($node->nid);
+      break;
+  }
+}
+
+/**
+ * Implementation of hook_menu_link_alter().
+ *
+ * Deals with external changes to maintained menu links before they are saved,
+ * either by merging the changes back into category system, or disallowing
+ * the changes to be saved.
+ */
+function category_menu_menu_link_alter(&$item, $menu) {
+  if ($item['module'] == 'category_menu' && empty($item['options']['category_menu_unlock']) && !empty($item['mlid']) && $old_item = db_fetch_array(db_query("SELECT * FROM {menu_links} WHERE mlid = %d", $item['mlid']))) {
+    // Disallow changes to these values, because we cannot keep them: Next
+    // edit of the node is going to overwrite them.
+    foreach (array('expanded', 'plid', 'link_title', 'hidden') as $key) {
+      if ($item[$key] != $old_item[$key]) {
+        $item[$key] = $old_item[$key];
+      }
+    }
+    // Merge new menu item weight back to category, so that reordering of menus work.
+    // This is split into two queries, to avoid PgSQL compatibility issues on JOINs.
+    if ($item['weight'] != $old_item['weight']) {
+      $node = db_fetch_array(db_query("SELECT * FROM {category_menu_map} WHERE mlid = %d", $item['mlid']));
+      if (!empty($node['nid'])) {
+        db_query("UPDATE {category} SET weight = %d WHERE cid = %d", $item['weight'], $node['nid']);
+        category_cache_op('flush', 'all');
+      }
+    }
+  }
+  unset($item['options']['category_menu_unlock']);
+}
+
+/**
+ * Implementation of hook_form_alter().
+ *
+ * Adds the category menu settings to the container node form,
+ * and alters menu overview screen for compatibility.
+ */
+function category_menu_form_alter(&$form, $form_state, $form_id) {
+  if (isset($form['type']) && isset($form['#node']) && $form['type']['#value']
+  .'_node_form' == $form_id) {
+    // Remove the menu-on-the-fly fieldset added by core menu module.
+    unset($form['menu']);
+
+    // Add elements to the node form
+    $node = $form['#node'];
+
+    if (!empty($node->category_menu_map['mlid'])) {
+      $form['category']['#tree'] = TRUE;
+      $form['category']['menu_map']['#tree'] = TRUE;
+      $form['category']['menu_map']['mlid'] = array(
+        '#type' => 'value',
+        '#value' => $node->category_menu_map['mlid'],
+      );
+    }
+    $form['#submit'][] = 'category_menu_node_form_submit';
+
+    $behavior = variable_get('category_behavior_'. $node->type, 0);
+
+    if (!empty($behavior) && $behavior == 'container') {
+      // Prepare existing settings
+      if (!isset($node->category_menu['container_has_parent_link'])) {
+        $node->category_menu['container_has_parent_link'] = !empty($node->category_menu['plid_for_container']);
+      }
+      if (!empty($node->category_menu['plid_for_container'])) {
+        $item = db_fetch_array(db_query("SELECT m.*, ml.* FROM {menu_links} ml LEFT JOIN {menu_router} m ON m.path = ml.router_path WHERE ml.mlid = %d", $node->category_menu['plid_for_container']));
+        $node->category_menu['plid_value_for_container'] = $node->category_menu['plid_for_container'];
+        $node->category_menu['plid_for_container'] = $item['menu_name'] .':'. $node->category_menu['plid_for_container'];
+      }
+
+      $form['category']['menu'] = array(
+        '#type' => 'fieldset',
+        '#title' => t('Menu links'),
+        '#collapsible' => TRUE,
+        '#collapsed' => TRUE,
+        '#weight' => 5,
+      );
+
+      if (empty($node->category['hierarchy']) || (int) $node->category['hierarchy'] < 2) {
+        drupal_add_js("if (Drupal.jsEnabled) { $(document).ready(function() { $('#edit-category-menu-update-links-for-nodes').css('display', 'none'); $('#edit-category-menu-update-container-parent-link').css('display', 'none'); $('input.category-menu-links-for-cats').click(function() {if ( this.value == '1') { $('div#edit-category-menu-hidden-elements').show('medium'); } else { $('div#edit-category-menu-hidden-elements').hide('medium'); } }); }); }", 'inline');
+
+        if (empty($node->category_menu['links_for_cats'])) {
+          drupal_add_js("if (Drupal.jsEnabled) { $(document).ready(function() { $('div#edit-category-menu-hidden-elements').css('display', 'none'); }); }", 'inline');
+        }
+
+        $form['category']['menu']['links_for_cats'] = array(
+          '#type' => 'radios',
+          '#title' => t('Generate menu links for categories'),
+          '#default_value' => isset($node->category_menu['links_for_cats']) ? $node->category_menu['links_for_cats'] : 0,
+          '#options' => array(0 => t('Disabled'), 1 => t('Enabled')),
+          '#description' => t("If enabled, a menu link is automatically created and maintained for this container and for every category within it. When you set this to 'enabled', additional options will appear below."),
+          '#attributes' => array('class' => 'category-menu-links-for-cats'),
+        );
+
+        $form['category']['menu']['hidden_start'] = array(
+          '#value' => '<div id="edit-category-menu-hidden-elements">',
+        );
+
+        $form['category']['menu']['expanded_for_cats'] = array(
+          '#type' => 'checkbox',
+          '#title' => t('Expanded'),
+          '#default_value' => isset($node->category_menu['expanded_for_cats']) ? $node->category_menu['expanded_for_cats'] : 0,
+          '#description' => t("If selected and any categories in this container have children, the menu links for those categories will always appear expanded."),
+        );
+
+        $form['category']['menu']['menu_name'] = array(
+          '#type' => 'select',
+          '#title' => t('Menu to put links into'),
+          '#options' => array('default' => '<own menu>') + menu_get_menus(),
+          '#default_value' => isset($node->category_menu['menu_name']) ? $node->category_menu['menu_name'] : 'default',
+          '#description' => t("The menu to populate with automatically generated links. If set to '&lt;own menu&gt;', the links will be put into a dedicated menu for this container. This dedicated menu is hidden, and the links within it cannot be edited on the menu administration page. If set to a different menu, the links will be put into a custom menu that may also contain links unrelated to this container."),
+        );
+        $nodes_options = array_flip(node_get_types('names'));
+        $nodes_options = array_intersect($nodes_options, (!empty($node->category['nodes']) && is_array($node->category['nodes'])) ? $node->category['nodes'] : array());
+        $nodes_options = array_map('check_plain', array_flip($nodes_options));
+
+        $default_options = array();
+        $taken_options = array();
+        $is_preset = !empty($node->category_menu['links_for_nodes']);
+        foreach (array_keys($nodes_options) as $type) {
+          $type_setting = variable_get('category_menu_links_'. $type, 0);
+          $was_selected = ($is_preset && !empty($node->category_menu['links_for_nodes'][$type]));
+          if (!empty($type_setting)) {
+            if ($type_setting == $node->nid) {
+              if (!$is_preset || $was_selected) {
+                $default_options[$type] = $type;
+              }
+            }
+            else {
+              $taken_options[$type] = $type;
+            }
+          }
+          else if ($was_selected) {
+            $default_options[$type] = $type;
+          }
+        }
+        $category_link['links_for_nodes'] = $nodes_options;
+        $category_link['links_selected'] = $default_options;
+        $category_link['taken_options'] = $taken_options;
+
+        $form['category']['menu']['links_for_nodes'] = _category_menu_links_for_nodes($category_link);
+
+        $form['category']['menu']['update-links-for-nodes'] = array(
+          '#type' => 'submit',
+          '#value' => t('Update list of content types'),
+           // Submit the node form so the list of content types gets updated.
+           // This is typically only used when JS is disabled.  Since the checkbox list
+           // won't be changed via AJAX, a button is provided in the node form to submit
+           // the form and re-generate the list corresponding to the
+           // current content type associations.  This is similar to what happens during a node preview.
+          '#submit' => array('node_form_submit_build_node'),
+          '#weight' => 5,
+        );
+
+        if (isset($form['category']['content_types']['nodes'])) {
+          $form['category']['content_types']['nodes']['#ahah'] = array(
+            'path' => 'category_menu/js/form',
+            'wrapper' => 'edit-category-menu-links-for-nodes-wrapper',
+            'effect' => 'slide',
+          );
+          $form['category']['content_types']['nodes']['#process'] = array(
+            'category_menu_expand_ahah_checkboxes',
+          );
+        }
+
+        $form['category']['menu']['container_has_parent_link'] = array(
+          '#type' => 'checkbox',
+          '#title' => t('Use custom menu link as container parent'),
+          '#default_value' => isset($node->category_menu['container_has_parent_link']) ? $node->category_menu['container_has_parent_link'] : 0,
+          '#prefix' => '<br />',
+          '#suffix' => '<br />',
+          '#ahah' =>  array(
+            'path' => 'category_menu/js/form_parent_link',
+            'wrapper' => 'edit-category-menu-parent-link-for-container-wrapper',
+            'effect' => 'slide',
+          ),
+        );
+
+        $form['category']['menu']['update-container-parent-link'] = array(
+          '#type' => 'submit',
+          '#value' => t('Update list of menu links'),
+          '#submit' => array('node_form_submit_build_node'),
+          '#weight' => 5,
+        );
+
+        $category_link['has_parent_link'] = isset($node->category_menu['container_has_parent_link']) ? $node->category_menu['container_has_parent_link'] : 0;
+        $category_link['link_selected'] = isset($node->category_menu['plid_for_container']) ? $node->category_menu['plid_for_container'] : NULL;
+        $category_link['link_selected_value'] = isset($node->category_menu['plid_value_for_container']) ? $node->category_menu['plid_value_for_container'] : NULL;
+        $category_link['has_parents'] = !(empty($node->category['parents']) || (isset($node->category['parents'][0]) && empty($node->category['parents'][0]->cid)));
+
+        $form['category']['menu']['plid_for_container'] = _category_menu_parent_link_for_container($category_link);
+
+        $form['category']['menu']['hidden_end'] = array(
+          '#value' => '</div>',
+        );
+      }
+      else {
+        $form['category']['menu']['links_for_cats'] = array(
+          '#type' => 'value',
+          '#value' => 0,
+        );
+        $form['category']['menu']['expanded_for_cats'] = array(
+          '#type' => 'value',
+          '#value' => 0,
+        );
+        $form['category']['menu']['links_for_nodes'] = array(
+          '#type' => 'value',
+          '#value' => array(),
+        );
+        $form['category']['menu']['container_has_parent_link'] = array(
+          '#type' => 'value',
+          '#value' => 0,
+        );
+        $form['category']['menu']['plid_for_container'] = array(
+          '#type' => 'value',
+          '#value' => NULL,
+        );
+
+        $form['category']['menu']['info_message'] = array(
+          '#value' => '<em>'. t('Menu links cannot be used in a multiple hierarchy container. If you wish to generate menu links, you must first modify the categories in this container such that each category has no more than one parent.') .'</em>',
+        );
+      }
+    }
+  }
+
+  // Grey-out incompatible settings for maintained menu items on the menu overview
+  // screen, and swap edit link to point to corresponding node edit.
+  if ($form_id == 'menu_overview_form') {
+    $title = t('To change this item, you need to edit the corresponding node.');
+    foreach ($form as $key => $row) {
+      if (!empty($row['#item']['module']) && $row['#item']['module'] == 'category_menu') {
+        $form[$key]['hidden']['#disabled'] = TRUE;
+        $form[$key]['expanded']['#disabled'] = TRUE;
+        $form[$key]['operations']['edit']['#value'] = l(t('edit node'), $row['#item']['link_path'] .'/edit', array('query' => drupal_get_destination(), 'attributes' => array('title' => $title)));
+      }
+    }
+  }
+}
+
+/**
+ * Additional form submit handler for node forms.
+ *
+ * Flattens and processes the $form_state['values']['category']['menu']
+ * and ...['menu_map'] arrays on both submits and previews.
+ */
+function category_menu_node_form_submit($form, &$form_state) {
+  $fieldsets = array(
+    'menu' => TRUE,
+    'menu_map' => TRUE,
+  );
+  if (!empty($form_state['values']['category']) && is_array($form_state['values']['category'])) {
+    foreach ($form_state['values']['category'] as $key => $value) {
+      if (isset($fieldsets[$key]) && is_array($value)) {
+        if (isset($value['plid_for_container']) && preg_match('/^[A-Za-z0-9\-_]+:[0-9]+$/', $value['plid_for_container'])) {
+          $value_parts = explode(':', $value['plid_for_container']);
+          $value['plid_for_container'] = $value_parts[1];
+        }
+
+        $fieldset = 'category_'. $key;
+        if (empty($form_state['values'][$fieldset])) {
+          $form_state['values'][$fieldset] = array();
+        }
+        $form_state['values'][$fieldset] = $value + $form_state['values'][$fieldset];
+
+        unset($form_state['values']['category'][$key]);
+      }
+    }
+  }
+}
+
+/**
+ * Implementation of hook_node_type().
+ */
+function category_menu_node_type($op, $info) {
+  if ($op == 'update' && !empty($info->old_type) && $info->type != $info->old_type) {
+    $menu_links = variable_get('category_menu_links_'. $info->old_type, 0);
+    variable_del('category_menu_links_'. $info->old_type);
+    if (!empty($menu_links)) {
+      variable_set('category_menu_links_'. $info->type, $menu_links);
+    }
+  }
+  elseif ($op == 'delete') {
+    variable_del('category_menu_links_'. $info->type);
+  }
+}
+
+/**
+ * Build the content type checkbox list form element for the category_menu
+ * node form
+ *
+ * This function is also called when generating a new set of checkboxes during the
+ * AJAX callback, so an array is returned that can be used to replace an existing
+ * form element.
+ */
+function _category_menu_links_for_nodes($category_link) {
+  $form = array(
+    '#type' => 'item',
+    '#title' => t('Generate menu links for assigned content'),
+    '#prefix' => '<div id="edit-category-menu-links-for-nodes-wrapper">',
+    '#suffix' => '</div>',
+  );
+
+  if (empty($category_link['links_for_nodes'])) {
+    $form['#value'] = '<em>'. t('There are no content types associated with this container. You must associate at least one content type with this container, before you can generate menu links for assigned content.') .'</em>';
+  }
+  else {
+    if (empty($category_link['links_selected'])) {
+      $category_link['links_selected'] = array();
+    }
+    if (empty($category_link['taken_options'])) {
+      $category_link['taken_options'] = array();
+    }
+    $form = array(
+      '#type' => 'checkboxes',
+      '#title' => t('Generate menu links for assigned content'),
+      '#default_value' => $category_link['links_selected'],
+      '#description' => t('This is a list of the content types to which you can assign categories from this container. For each content type that you select here, a menu link is automatically created and maintained for each piece of content of that type, when you categorize it using a category from this container. Content types that have their menu links generated by another container are listed here, but cannot be selected.'),
+      '#options' => $category_link['links_for_nodes'],
+      '#attributes' => array('class' => 'category-title-select'),
+      '#taken_options' => $category_link['taken_options'],
+      '#process' => array('category_menu_expand_disabled_checkboxes'),
+      '#prefix' => '<div id="edit-category-menu-links-for-nodes-wrapper">',
+      '#suffix' => '</div>',
+    );
+  }
+  return $form;
+}
+
+/**
+ * Form element process callback; combination of the form_expand_ahah() and
+ * expand_checkboxes() functions in form.inc. Expands the node type selection
+ * checkboxes, and assigns AHAH behavior to each checkbox.
+ */
+function category_menu_expand_ahah_checkboxes($element) {
+  $value = is_array($element['#value']) ? $element['#value'] : array();
+  $element['#tree'] = TRUE;
+
+  drupal_add_js('misc/jquery.form.js');
+  drupal_add_js('misc/ahah.js');
+
+  if (count($element['#options']) > 0) {
+    if (!isset($element['#default_value']) || $element['#default_value'] == 0) {
+      $element['#default_value'] = array();
+    }
+
+    foreach ($element['#options'] as $key => $choice) {
+      if (!isset($element[$key])) {
+        $element[$key] = array('#type' => 'checkbox', '#processed' => TRUE, '#title' => $choice, '#return_value' => $key, '#default_value' => isset($value[$key]), '#attributes' => $element['#attributes'], '#ahah' => $element['#ahah']);
+        $element[$key]['#ahah']['event'] = 'change';
+        $element[$key]['#id'] = $element['#id'] .'-'. $key;
+
+        if (isset($element['#ahah']['path']) && !isset($element['#ahah']['event'])) {
+          $element[$key]['#ahah']['path'] = $element['#ahah']['path'];
+
+          $element[$key]['#cache'] = TRUE;
+        }
+      }
+    }
+    $element['#ahah'] = NULL;
+  }
+  return $element;
+}
+
+/**
+ * Form element process callback; much like the expand_checkboxes() function
+ * in form.inc, except that it also sets appropriate elements to be disabled.
+ */
+function category_menu_expand_disabled_checkboxes($element) {
+  $value = is_array($element['#value']) ? $element['#value'] : array();
+  $element['#tree'] = TRUE;
+  if (count($element['#options']) > 0) {
+    if (!isset($element['#default_value']) || $element['#default_value'] == 0) {
+      $element['#default_value'] = array();
+    }
+    foreach ($element['#options'] as $key => $choice) {
+      if (!isset($element[$key])) {
+        $element[$key] = array('#type' => 'checkbox', '#processed' => TRUE, '#title' => $choice, '#return_value' => $key, '#default_value' => isset($value[$key]), '#attributes' => $element['#attributes'], '#disabled' => isset($element['#taken_options'][$key]));
+        $element[$key]['#id'] = $element['#id'] .'-'. $key;
+        $element[$key]['#cache'] = TRUE;
+      }
+    }
+  }
+  return $element;
+}
+
+/**
+ * Build the menu parent link select list form element for the category_menu
+ * node form.
+ *
+ * This function is also called when generating a new list during the
+ * AJAX callback, so an array is returned that can be used to replace an existing
+ * form element.
+ */
+function _category_menu_parent_link_for_container($category_link) {
+  $form = array(
+    '#title' => t('Parent menu link of container'),
+    '#type' => 'item',
+    '#prefix' => '<div id="edit-category-menu-parent-link-for-container-wrapper">',
+    '#suffix' => '</div>',
+    '#value' => '<em>'. t('If you tick the above checkbox and this container has no parent, a list will appear here from which you can choose any menu link on the site to use as the parent of this container.') .'</em>',
+  );
+
+  if (!empty($category_link['has_parent_link']) && empty($category_link['has_parents'])) {
+    if (empty($category_link['link_selected'])) {
+      $category_link['link_selected'] = 0;
+    }
+    if (empty($category_link['link_selected_value'])) {
+      $category_link['link_selected_value'] = 0;
+    }
+
+    // Generate a list of possible parents (not including this item or descendants).
+    $item['mlid'] = 0;
+    $item['plid'] = 0;
+    $item['menu_name'] = '';
+    $item_arg = $item;
+    if (!empty($category_link['link_selected_value']) && $item_temp = db_fetch_array(db_query("SELECT m.*, ml.* FROM {menu_links} ml LEFT JOIN {menu_router} m ON m.path = ml.router_path WHERE ml.mlid = %d", $category_link['link_selected_value']))) {
+      $item = $item_temp;
+    }
+    $options = menu_parent_options(menu_get_menus(), $item_arg);
+    $default = $item['menu_name'] .':'. $item['mlid'];
+    if (!isset($options[$default])) {
+      $default = 'navigation:0';
+    }
+    $form = array(
+      '#type' => 'select',
+      '#title' => t('Parent menu link of container'),
+      '#default_value' => $default,
+      '#options' => $options,
+      '#description' => t('The maximum depth for an item and all its children is fixed at !maxdepth. Some menu items may not be available as parents if selecting them would exceed this limit.', array('!maxdepth' => MENU_MAX_DEPTH)),
+      '#attributes' => array('class' => 'menu-title-select'),
+      '#prefix' => '<div id="edit-category-menu-parent-link-for-container-wrapper">',
+      '#suffix' => '</div>',
+    );
+  }
+  return $form;
+}
+
+/**
+ * Implementation of hook_category_legacy().
+ */
+function category_menu_category_legacy($op, &$items, $edit = NULL) {
+  switch ($op) {
+    case 'import_taxonomy_prepare':
+    case 'import_book_prepare':
+      foreach ($items as $key => $item) {
+        $fields = array('item_for_cats', 'item_for_nodes');
+        foreach ($fields as $field) {
+          $items[$key][$field] = $edit[$field];
+        }
+      }
+      break;
+  }
+}
+
+/**
+ * Responds to the load of an existing container, by loading the container's
+ * menu settings from the database.
+ *
+ * @param $nid
+ *   The node ID of the container being loaded.
+ *
+ * @return
+ *   The menu settings for the specified node.
+ */
+function category_menu_get_container($nid) {
+  $cache_key = 'cmenu_get_cont';
+  $container = category_cache_op('get', $nid, $cache_key);
+  if (!isset($container)) {
+
+    $result = db_query("SELECT * FROM {category_menu} WHERE cid = %d", $nid);
+
+    if ($container = db_fetch_object($result)) {
+      $links_for_nodes = array();
+      foreach (array_keys(node_get_types('names')) as $type) {
+        $links_setting = variable_get('category_menu_links_'. $type, 0);
+        if (!empty($links_setting) && $links_setting == $nid) {
+          $links_for_nodes[$type] = $type;
+        }
+      }
+      $container->links_for_nodes = $links_for_nodes;
+    }
+    else {
+      $container = (object) array();
+    }
+
+    category_cache_op('set', $nid, $cache_key, $container);
+  }
+  return $container;
+}
+
+/**
+ * Saves a container's menu settings to the database. This function is called when node_save()
+ * is run on a node that has container behavior.
+ */
+function category_menu_save_container(&$node) {
+  $new = !db_result(db_query('SELECT cid FROM {category_menu} WHERE cid = %d', $node->nid));
+  $node->category_menu['cid'] = $node->nid;
+  if (!isset($node->category_menu['plid_for_container'])) {
+    $node->category_menu['plid_for_container'] = 0;
+  }
+
+  if ($new) {
+    // Insert new.
+    drupal_write_record('category_menu', $node->category_menu);
+    $status = SAVED_NEW;
+  }
+  else {
+    drupal_write_record('category_menu', $node->category_menu, 'cid');
+    $status = SAVED_UPDATED;
+  }
+
+  foreach (node_get_types('names') as $type => $name) {
+    if (!empty($node->category_menu['links_for_nodes'][$type])) {
+      variable_set('category_menu_links_'. $type, (int) $node->nid);
+    }
+    else {
+      if (variable_get('category_menu_links_'. $type, 0) == $node->nid) {
+        variable_del('category_menu_links_'. $type);
+      }
+    }
+  }
+
+  category_cache_op('flush', 'all');
+  return $status;
+}
+
+/**
+ * Responds to the delete of an existing container, by deleting the container's
+ * menu settings in the database.
+ *
+ * @param $nid
+ *   The node ID of the container being deleted.
+ */
+function category_menu_del_container($nid) {
+  db_query('DELETE FROM {category_menu} WHERE cid = %d', $nid);
+
+  foreach (node_get_types('names') as $type => $name) {
+    $link_setting = variable_get('category_menu_links_'. $type, 0);
+    if (!empty($link_setting) && $link_setting == $nid) {
+      variable_del('category_menu_links_'. $type);
+    }
+  }
+  category_cache_op('flush', 'all');
+}
+
+/**
+ * Like menu_link_load(), but adds additional data from the {category_menu_map} table.
+ *
+ * Do not call when loading a node, since this function may call node_load().
+ */
+function category_menu_map_load($mlid) {
+  if ($item = db_fetch_array(db_query("SELECT ml.*, cmm.nid, m.* FROM {menu_links} ml INNER JOIN {category_menu_map} cmm ON cmm.mlid = ml.mlid LEFT JOIN {menu_router} m ON m.path = ml.router_path WHERE ml.mlid = %d", $mlid))) {
+    _menu_link_translate($item);
+    return $item;
+  }
+  return FALSE;
+}
+
+/**
+ * Loads a category_menu menu link based on nid. This function is safe to call
+ * during hook_nodeapi('load').
+ */
+function category_menu_map_load_by_nid($nid) {
+  $cache_key = 'cmenu_map_load_nid';
+  $item = category_cache_op('get', $nid, $cache_key);
+  if (!isset($item)) {
+
+    if ($item = db_fetch_array(db_query('SELECT m.*, cmm.nid, ml.* FROM {menu_links} ml INNER JOIN {category_menu_map} cmm ON cmm.mlid = ml.mlid LEFT JOIN {menu_router} m ON m.path = ml.router_path WHERE cmm.nid = %d', $nid))) {
+      $item['options'] = unserialize($item['options']);
+    }
+    else {
+      $item = FALSE;
+    }
+
+    category_cache_op('set', $nid, $cache_key, $item);
+  }
+  return $item;
+}
+
+/**
+ * Updates the menu item and the menu mapping for the given node.
+ */
+function category_menu_map_save($node) {
+  $behavior = variable_get('category_behavior_'. $node->type, 0);
+  $new_plid = NULL;
+  $new = empty($node->category_menu_map['mlid']);
+
+  if (!$new) {
+    $node->category_menu_map = category_menu_map_load_by_nid($node->nid);
+  }
+
+  // Logic for categories and containers.
+  if (!empty($behavior)) {
+    $container_settings = NULL;
+    if ($behavior == 'container') {
+      $container_settings = $node->category + $node->category_menu;
+    }
+    else {
+      $container_settings = ((array) category_get_container($node->category['cnid'])) + ((array) category_menu_get_container($node->category['cnid']));
+    }
+
+    // Abort the menu link creation if the current container has menu links
+    // disabled, or if the current container supports multiple parents.
+    if (!$container_settings['links_for_cats'] || (isset($container_settings['hierarchy']) && $container_settings['hierarchy'] > 1)) {
+      if (!$new) {
+        category_menu_map_delete($node->nid);
+      }
+      return FALSE;
+    }
+
+    if ($behavior == 'container') {
+      // Abort the menu link creation if this node is a hidden container.
+      if ($container_settings['hidden_cont']) {
+        if (!$new) {
+          category_menu_map_delete($node->nid);
+        }
+        return FALSE;
+      }
+
+      // If this node is a container with no parents, then check to see if
+      // a custom menu parent has been defined, and if so, use it.
+      if (empty($node->category['parents']) || (isset($node->category['parents'][0]) && empty($node->category['parents'][0]->cid) && (!is_numeric($node->category['parents'][0])))) {
+        if (!empty($container_settings['plid_for_container']) && $parent_link = menu_link_load($container_settings['plid_for_container'])) {
+          $new_plid = $container_settings['plid_for_container'];
+        }
+        else {
+          $new_plid = 0;
+        }
+      }
+    }
+
+    if (!isset($new_plid)) {
+      $new_plid = _category_menu_map_save_category($node->nid);
+    }
+
+    $node->category_menu_map['expanded'] = $container_settings['expanded_for_cats'];
+    $node->category_menu_map['weight'] = $node->category['weight'];
+  }
+  // Logic for assigned node types.
+  else {
+    $abort_menu_save = FALSE;
+    $container_settings = NULL;
+    $assigned_cats = NULL;
+    $assigned_cat = NULL;
+    $assigned_cat_menu_link = NULL;
+
+    // Abort if the content type of this node hasn't got menu links defined.
+    if (!($linked_cnid = variable_get('category_menu_links_'. $node->type, 0))) {
+      $abort_menu_save = TRUE;
+    }
+    // Abort if the container linked to this content type doesn't have this
+    // content type as an assigned node type (should never be the case).
+    elseif (!(($container_settings = ((array) category_get_container($linked_cnid))) && isset($container_settings['nodes'][$node->type]))) {
+      $abort_menu_save = TRUE;
+    }
+    // Abort if the container linked to this content type doesn't have
+    // menu link generation enabled, or is a multi-parent container.
+    elseif (!(($container_settings += ((array) category_menu_get_container($linked_cnid))) && $container_settings['links_for_cats'] || $container_settings['hierarchy'] < 2)) {
+      $abort_menu_save = TRUE;
+    }
+    // Abort if this node is not tagged with exactly one category from
+    // the container linked to this content type.
+    elseif (!(($assigned_cats = category_node_get_categories_by_container($node, $linked_cnid)) && count($assigned_cats) == 1)) {
+      $abort_menu_save = TRUE;
+    }
+    // Abort if the category that this node is tagged with doesn't have a
+    // menu link.
+    elseif (!(($assigned_cat = reset($assigned_cats)) && ($assigned_cat_menu_link = category_menu_map_load_by_nid($assigned_cat->cid)))) {
+      $abort_menu_save = TRUE;
+    }
+
+    if ($abort_menu_save) {
+      if (!$new) {
+        category_menu_map_delete($node->nid);
+      }
+      return FALSE;
+    }
+
+    $new_plid = $assigned_cat_menu_link['mlid'];
+    // Weight for nodes will be re-saved as is (if available), to keep possible
+    // menu order customizations.
+  }
+
+  $node->category_menu_map['menu_name'] = category_menu_menu_name($container_settings['menu_name'], $container_settings['cid']);
+  $node->category_menu_map['link_path'] = 'node/'. $node->nid;
+  $node->category_menu_map['link_title'] = $node->title;
+  $node->category_menu_map['parent_mismatch'] = FALSE;
+  $node->category_menu_map['module'] = 'category_menu';
+  $node->category_menu_map['plid'] = $new_plid;
+  $node->category_menu_map['hidden'] = (int) !$node->status;
+  $menu_name = $node->category_menu_map['menu_name'];
+
+  $node->category_menu_map['options']['category_menu_unlock'] = TRUE;
+  if (menu_link_save($node->category_menu_map)) {
+    if ($new) {
+      // Insert new.
+      db_query("INSERT INTO {category_menu_map} (mlid, nid) VALUES (%d, %d)", $node->category_menu_map['mlid'], $node->nid);
+    }
+
+    // For distant-parent menu links, the menu system overwrites 'menu_name'
+    // to the 'menu_name' of the parent, which is wrong. If this happens,
+    // force it back to what we asked for.
+    if ($node->category_menu_map['menu_name'] != $menu_name) {
+      db_query("UPDATE {menu_links} SET menu_name = '%s' WHERE mlid = %d", $menu_name, $node->category_menu_map['mlid']);
+    }
+
+    cache_clear_all('category-menu-links:'. $menu_name .':', 'cache_menu', TRUE);
+    cache_clear_all('category-menu-trail-links:'. $menu_name .':', 'cache_menu', TRUE);
+
+    return TRUE;
+  }
+
+  // Failed to save the menu link
+  return FALSE;
+}
+
+/**
+ * Finds the mlid of the menu link to use as the parent of the specified
+ * category / container node. Searches the ancestors of this node recursively,
+ * until it finds an ancestor that is not a hidden container, and that has a
+ * menu link defined.
+ *
+ * @param $nid
+ *   The node ID of the category / container to find a parent mlid for.
+ *
+ * @param $return
+ *   The mlid of a menu link tied to one of the node's ancestors (as defined
+ *   by the category hierarchy), or 0 if no suitable menu link was found.
+ */
+function _category_menu_map_save_category($nid) {
+  category_cache_op('flush', 'all');
+  $parents = category_get_parents($nid, 'cid', TRUE);
+  $parent = reset($parents);
+
+  if (empty($parent->cid)) {
+    // Special edge case of a category with one or more hidden containers as
+    // its ancestors, and with the top hidden container having a custom menu
+    // parent. In such cases, the category gets the custom menu parent as its
+    // menu parent.
+    if (($container = category_get_container($nid)) && $container->hidden_cont && ($container_menu = category_menu_get_container($nid)) && !empty($container_menu->plid_for_container) && ($parent_link = menu_link_load($container_menu->plid_for_container))) {
+      return $container_menu->plid_for_container;
+    }
+    else {
+      return 0;
+    }
+  }
+
+  $parent_category = category_get_category($parent->cid);
+
+  if (empty($parent_category->cnid) && ($parent_container = category_get_container($parent->cid)) && $parent_container->hidden_cont) {
+    // Only recurse down when we hit a hidden container.
+    return _category_menu_map_save_category($parent->cid);
+  }
+  else {
+    if ($parent_link = category_menu_map_load_by_nid($parent->cid)) {
+      return $parent_link['mlid'];
+    }
+  }
+
+  return 0;
+}
+
+/**
+ * Deletes the menu item and the menu mapping for the given node.
+ */
+function category_menu_map_delete($nid) {
+  $menu_link = category_menu_map_load_by_nid($nid);
+
+  if (!empty($menu_link['mlid'])) {
+    menu_link_delete($menu_link['mlid']);
+    db_query('DELETE FROM {category_menu_map} WHERE mlid = %d', $menu_link['mlid']);
+  }
+}
+
+/**
+ * Generate the corresponding menu name from a container ID.
+ */
+function category_menu_menu_name($menu_name, $cnid) {
+  if ($menu_name == 'default') {
+    return 'category-menu-toc-'. $cnid;
+  }
+
+  return $menu_name;
+}
+
+/**
+ * Build an active trail to show in the breadcrumb.
+ */
+function category_menu_build_active_trail($menu_link) {
+  static $trail;
+
+  if (!isset($trail)) {
+    $trail = array();
+    $trail[] = array('title' => t('Home'), 'href' => '<front>', 'localized_options' => array());
+
+    $tree = category_menu_tree_all_data($menu_link['menu_name'], $menu_link, NULL, 'category-menu-trail-');
+    $curr = array_shift($tree);
+
+    while ($curr) {
+      if ($curr['link']['href'] == $menu_link['href']) {
+        $trail[] = $curr['link'];
+        $curr = FALSE;
+      }
+      else {
+        if ($curr['below'] && $curr['link']['in_active_trail']) {
+          $trail[] = $curr['link'];
+          $tree = $curr['below'];
+        }
+        $curr = array_shift($tree);
+      }
+    }
+  }
+  return $trail;
+}
+
+/**
+ * Creates a tree that is able to recognise distant-parent menu items.
+ * This is done by finding top-level menu items with a parent defined (which
+ * technically should never exist in Drupal), and by extending the tree based
+ * on these items. The tree is also extended down, by searching for distant
+ * children of bottom-level menu items.
+ */
+function category_menu_tree_all_data($menu_name, &$item, $max_depth = NULL, $cache_prefix = 'category-menu-') {
+  // Cache key employs current user's roles, to cover access check performed
+  // inside _category_menu_tree_all_data(). (TODO: Check whether that check is
+  // necessary, considering these are our own generated menu items.)
+  global $user;
+  $cache_key = 'cmenu_tree_all_data'. $menu_name .':'. $item['mlid'] .':'. $max_depth .':'. implode(':', $user->roles);
+  $tree = category_cache_op('get', 0, $cache_key);
+  if (!isset($tree)) {
+
+    // Start with a regular tree, based on the specified item, containing
+    // items local to the $menu_name menu.
+    $tree = _category_menu_tree_all_data($menu_name, $item, $cache_prefix, $max_depth);
+
+    // Next, find top-level items with defined parents, and extend the tree
+    // to include such parents and their ancestors.
+    $parent_link = reset($tree);
+    $parent_link_key = key($tree);
+    while ($parent_link['link']['plid']) {
+      $item['has_children'] = 1;
+      $ancestor_link = menu_link_load($parent_link['link']['plid']);
+      if ($ancestor_link['menu_name'] != $menu_name) {
+        $tree = _category_menu_tree_all_data($ancestor_link['menu_name'], $ancestor_link, $cache_prefix);
+        _category_menu_tree_above($tree, array(
+          'key' => $parent_link_key,
+          'value' => $parent_link,
+        ));
+
+        $parent_link = reset($tree);
+        $parent_link_key = key($tree);
+      }
+      else {
+        $parent_link['link']['plid'] = 0;
+      }
+    };
+
+    $query_nodetypes1 = '';
+    $query_nodetypes2 = '';
+    $args = array($item['mlid'], $menu_name);
+    if ($category = db_fetch_object(db_query('SELECT c.* FROM {category} c INNER JOIN {category_menu_map} cmm ON c.cid = cmm.nid WHERE cmm.mlid = %d', $item['mlid']))) {
+      $cnid = !empty($category->cnid) ? $category->cnid : $category->cid;
+      $node_types = array();
+      $query_nodetypes = db_query('SELECT type FROM {category_cont_node_types} WHERE cid = %d', $cnid);
+
+      while ($node_type = db_fetch_object($query_nodetypes)) {
+        $node_types[] = 'category-menu-toc-'. $node_type->type;
+      }
+
+      if (!empty($node_types)) {
+        $query_nodetypes1 = ' LEFT JOIN {category_menu_map} cmm ON ml.mlid = cmm.mlid LEFT JOIN {node} n ON cmm.nid = n.nid';
+
+        $placeholders = db_placeholders($node_types, 'varchar');
+        $query_nodetypes2 = ' AND ml.menu_name NOT IN('. $placeholders .')';
+        $args = array_merge($args, $node_types);
+      }
+    }
+
+    $query = "SELECT m.*, ml.* FROM {menu_links} ml LEFT JOIN {menu_router} m ON m.path = ml.router_path". $query_nodetypes1 ." WHERE ml.plid = %d AND ml.menu_name != '%s'". $query_nodetypes2;
+
+    if (isset($max_depth)) {
+      $query .= ' AND ml.depth < %d';
+      $args[] = $max_depth - 1;
+    }
+    // Finally, find distant children with the specified item as their parent,
+    // and extend the tree to include such children and their descendants.
+    $children = db_query($query, $args);
+    $child_tree_prev = array();
+
+    while ($child_link = db_fetch_array($children)) {
+      $item['has_children'] = 1;
+      _menu_link_translate($child_link);
+      $child_tree = _category_menu_tree_all_data($child_link['menu_name'], $child_link, $cache_prefix);
+      if (!empty($child_tree) && $child_tree != $child_tree_prev) {
+        _category_menu_tree_below($tree, $child_tree, $item);
+        $child_tree_prev = $child_tree;
+      }
+    }
+
+  category_cache_op('set', 0, $cache_key, $tree);
+  }
+
+  return $tree;
+}
+
+/**
+ * Get the data structure representing a named menu tree.
+ *
+ * Since this can be the full tree including hidden items, the data returned
+ * may be used for generating an an admin interface or a select.
+ *
+ * @param $menu_name
+ *   The named menu links to return
+ * @param $item
+ *   A fully loaded menu link, or NULL.  If a link is supplied, only the
+ *   path to root will be included in the returned tree- as if this link
+ *   represented the current page in a visible menu.
+ * @return
+ *   An tree of menu links in an array, in the order they should be rendered.
+ */
+function _category_menu_tree_all_data($menu_name = 'navigation', $item = NULL, $cache_prefix = 'category-menu-', $max_depth = NULL) {
+  static $tree = array();
+
+  // Use $mlid as a flag for whether the data being loaded is for the whole tree.
+  $mlid = isset($item['mlid']) ? $item['mlid'] : 0;
+  // Generate a cache ID (cid) specific for this $menu_name and $item.
+  $cid = $cache_prefix . 'links:'. $menu_name .':all-cid:'. $mlid;
+
+  if (!isset($tree[$cid])) {
+    // If the static variable doesn't have the data, check {cache_menu}.
+    $cache = cache_get($cid, 'cache_menu');
+    if ($cache && isset($cache->data)) {
+      // If the cache entry exists, it will just be the cid for the actual data.
+      // This avoids duplication of large amounts of data.
+      $cache = cache_get($cache->data, 'cache_menu');
+      if ($cache && isset($cache->data)) {
+        $data = $cache->data;
+      }
+    }
+    // If the tree data was not in the cache, $data will be NULL.
+    if (!isset($data)) {
+      // Build and run the query, and build the tree.
+      if ($mlid) {
+        if ($cache_prefix == 'category-menu-trail-') {
+          // The tree is for a single item, so we need to match the values in its
+          // p columns and 0 (the top level) with the plid values of other links.
+          $args = array(0);
+          for ($i = 1; $i < MENU_MAX_DEPTH; $i++) {
+            $args[] = $item["p$i"];
+          }
+          $args = array_unique($args);
+          $placeholders = implode(', ', array_fill(0, count($args), '%d'));
+          $where = ' AND ml.plid IN ('. $placeholders .')';
+          $parents = $args;
+          $parents[] = $item['mlid'];
+        }
+        else {
+          $parents = array(0);
+          for ($i = 1; $i < MENU_MAX_DEPTH; $i++) {
+            $parents[] = $item["p$i"];
+          }
+          $parents = array_unique($parents);
+          $where = ' AND ml.depth > %d';
+          $args = array($item['depth']);
+
+          if (isset($max_depth)) {
+            $where .= ' AND ml.depth < %d';
+            $args[] = $max_depth + $item['depth'] + ($max_depth ? 1 : 2);
+          }
+
+          $parents[] = $item['mlid'];
+        }
+      }
+      else {
+        // Get all links in this menu.
+        $where = '';
+        $args = array();
+        $parents = array();
+      }
+      array_unshift($args, $menu_name);
+      // Select the links from the table, and recursively build the tree.  We
+      // LEFT JOIN since there is no match in {menu_router} for an external
+      // link.
+      $data['tree'] = menu_tree_data(db_query("
+        SELECT m.load_functions, m.to_arg_functions, m.access_callback, m.access_arguments, m.page_callback, m.page_arguments, m.title, m.title_callback, m.title_arguments, m.type, m.description, ml.*
+        FROM {menu_links} ml LEFT JOIN {menu_router} m ON m.path = ml.router_path
+        WHERE ml.menu_name = '%s'". $where ."
+        ORDER BY p1 ASC, p2 ASC, p3 ASC, p4 ASC, p5 ASC, p6 ASC, p7 ASC, p8 ASC, p9 ASC", $args), $parents);
+      $data['node_links'] = array();
+      menu_tree_collect_node_links($data['tree'], $data['node_links']);
+      // Cache the data, if it is not already in the cache.
+      $tree_cid = $cache_prefix . _menu_tree_cid($menu_name, $data);
+      if (!cache_get($tree_cid, 'cache_menu')) {
+        cache_set($tree_cid, $data, 'cache_menu');
+      }
+      // Cache the cid of the (shared) data using the menu and item-specific cid.
+      cache_set($cid, $tree_cid, 'cache_menu');
+    }
+    // Check access for the current user to each item in the tree.
+    menu_tree_check_access($data['tree'], $data['node_links']);
+    $tree[$cid] = $data['tree'];
+  }
+
+  return $tree[$cid];
+}
+
+/**
+ * Helper function for category_menu_tree_all_data(). Recursively searches the tree for
+ * the specified menu item, and appends the child tree below it.
+ */
+function _category_menu_tree_below(&$tree, $child_tree, $item) {
+  foreach (array_keys($tree) as $key) {
+    if ($tree[$key]['link']['mlid'] != $item['mlid']) {
+      if (!empty($tree[$key]['below'])) {
+        _category_menu_tree_below($tree[$key]['below'], $child_tree, $item);
+      }
+    }
+    else {
+      $tree[$key]['below'] = $child_tree;
+    }
+  }
+}
+
+/**
+ * Helper function for category_menu_tree_all_data(). Recursively searches the tree for
+ * the specified parent item, and appends the rest of the tree below it.
+ */
+function _category_menu_tree_above(&$tree, $parent_link) {
+  foreach (array_keys($tree) as $key) {
+    if (!empty($tree[$key]['below'])) {
+      _category_menu_tree_above($tree[$key]['below'], $parent_link);
+    }
+    else {
+      $tree[$key]['below'] = array($parent_link['key'] => $parent_link['value']);
+    }
+  }
+}

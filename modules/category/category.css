@@ -1,0 +1,27 @@
+/* $Id: category.css,v 1.5 2008/07/19 04:24:31 jaza Exp $ */
+
+.category-form fieldset .form-item {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+#edit-category-hierarchy-container-wrapper .description,
+.category-distant-wrapper .description {
+  clear: both;
+}
+tr.category-category-preview {
+  background-color: #EEE;
+}
+tr.category-category-divider-top {
+  border-bottom: none;
+}
+tr.category-category-divider-bottom {
+  border-top: 1px dotted #CCC;
+}
+.category-wrapper-installed {
+  font-weight: bold;
+  color: #008000;
+}
+.category-wrapper-notinstalled {
+  font-weight: bold;
+  color: #f00;
+}

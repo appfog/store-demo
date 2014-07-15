@@ -1,0 +1,13 @@
+<?php
+// $Id: category_breadcrumb.install,v 1.1 2007/08/21 20:13:47 bdragon Exp $
+
+/**
+ * Implementation of hook_uninstall().
+ */
+function category_breadcrumb_uninstall() {
+  variable_del('category_breadcrumb_amount');
+  variable_del('category_breadcrumb_catpages');
+  variable_del('category_breadcrumb_exclude');
+  variable_del('category_breadcrumb_title');
+}
+

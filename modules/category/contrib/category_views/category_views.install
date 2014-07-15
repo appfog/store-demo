@@ -1,0 +1,127 @@
+<?php
+// $Id: category_views.install,v 1.5 2009/12/02 00:29:44 jaza Exp $
+
+/**
+ * @file
+ * Update file for the category_views module. All functions in this
+ * file are implementations of hook_update_N(), unless indicated otherwise.
+ */
+
+/**
+ * Implementation of hook_schema().
+ */
+function category_views_schema() {
+  $schema['category_views'] = array(
+    'description' => 'Stores category_views settings for each container.',
+    'fields' => array(
+      'cid' => array(
+        'type' => 'int',
+        'unsigned' => true,
+        'not null' => true,
+        'default' => 0,
+        'description' => 'ID of the container {category_cont}.cid',
+      ),
+      'view_for_cats' => array(
+        'type' => 'varchar',
+        'length' => '32',
+        'default' => '0',
+        'not null' => TRUE,
+        'description' => 'The unique name of the View for categories in this container.',
+      ),
+      'view_for_cont' => array(
+        'type' => 'varchar',
+        'length' => '32',
+        'default' => '0',
+        'not null' => TRUE,
+        'description' => 'The unique name of the View for this container itself.',
+      ),
+    ),
+    'primary key' => array('cid'),
+  );
+  return $schema;
+}
+
+/**
+ * Implementation of hook_install().
+ */
+function category_views_install() {
+  drupal_install_schema('category_views');
+}
+
+/**
+ * Implementation of hook_uninstall().
+ */
+function category_views_uninstall() {
+  drupal_uninstall_schema('category_views');
+}
+
+/**
+ * Install category_views table if it didn't already exist.
+ */
+function category_views_update_1() {
+  $ret = array();
+  if (!db_table_exists('category_views')) {
+    db_create_table($ret, 'category_views', array(
+      'fields' => array(
+        'cid' => array('type' => 'int', 'unsigned' => true, 'not null' => true, 'default' => 0),
+        'view_id' => array('type' => 'int', 'size' => 'tiny', 'unsigned' => true, 'not null' => true, 'default' => 0),
+        'display_cont' => array('type' => 'int', 'size' => 'tiny', 'unsigned' => true, 'not null' => true, 'default' => 0),
+        'display_cat' => array('type' => 'int', 'size' => 'tiny', 'unsigned' => true, 'not null' => true, 'default' => 0),
+      ),
+      'primary key' => array('cid'),
+    ));
+  }
+  return $ret;
+}
+
+/**
+ * Update to 6.x: As of Views 2, Identifier of a view changed from numeric ID to
+ * unique name (a string). There's no point in keeping old data in the column, as
+ * all views must be re-created on 5.x to 6.x upgrade anyway.
+ */
+function category_views_update_6000() {
+  $ret = array();
+
+  $new_field = array(
+    'type' => 'varchar',
+    'length' => '32',
+    'default' => '0',
+    'not null' => TRUE,
+    'description' => 'The unique name of the View for this container.',
+  );
+
+  db_drop_field($ret, 'category_views', 'view_id');
+  db_add_field($ret, 'category_views', 'view_name', $new_field);
+
+  return $ret;
+}
+
+/**
+ * Change the storage from single View name and two flags, to separate
+ * View names for categories and for container itself. (Added after rc1
+ * release, so there might be some real data already.)
+ */
+function category_views_update_6001() {
+  $ret = array();
+
+  // Set up the two columns for separate View names.
+  $new_field = array(
+    'type' => 'varchar',
+    'length' => '32',
+    'default' => '0',
+    'not null' => TRUE,
+  );
+  db_add_field($ret, 'category_views', 'view_for_cont', $new_field);
+  db_change_field($ret, 'category_views', 'view_name', 'view_for_cats', $new_field);
+
+  // Migrate existing settings to the new schema.
+  $ret[] = update_sql("UPDATE {category_views} SET view_for_cont = view_for_cats");
+  $ret[] = update_sql("UPDATE {category_views} SET view_for_cont = '0' WHERE display_cont = 0");
+  $ret[] = update_sql("UPDATE {category_views} SET view_for_cats = '0' WHERE display_cat = 0");
+
+  // Remove unneeded old flags.
+  db_drop_field($ret, 'category_views', 'display_cont');
+  db_drop_field($ret, 'category_views', 'display_cat');
+
+  return $ret;
+}

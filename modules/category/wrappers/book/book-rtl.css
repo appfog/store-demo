@@ -1,0 +1,8 @@
+/* $Id: book-rtl.css,v 1.1 2008/07/08 16:12:39 jaza Exp $ */
+
+.book-navigation .page-previous {
+  float: right;
+}
+.book-navigation .page-up {
+  float: right;
+}

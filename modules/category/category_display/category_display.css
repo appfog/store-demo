@@ -1,0 +1,37 @@
+/* $Id: category_display.css,v 1.6 2008/07/19 14:56:43 jaza Exp $ */
+
+.category-navigation .menu {
+  border-top: 1px solid #888;
+  padding: 1em 0 0 3em;
+}
+.category-navigation .page-links {
+  border-top: 1px solid #888;
+  border-bottom: 1px solid #888;
+  text-align: center;
+  padding: 0.5em;
+}
+.category-navigation .page-previous {
+  text-align: left;
+  width: 42%;
+  display: block;
+  float: left; /* LTR */
+}
+.category-navigation .page-up {
+  margin: 0 5%;
+  width: 4%;
+  display: block;
+  float: left; /* LTR */
+}
+.category-navigation .page-next {
+  text-align: right;
+  width: 42%;
+  display: block;
+  float: right;
+}
+.category-toc-node-count {
+  font-style: italic;
+}
+.expanded ul.menu {
+  border: 0;
+  padding-top: 0;
+}

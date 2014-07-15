@@ -1,0 +1,12 @@
+; $Id: category.info,v 1.4 2008/07/08 16:12:38 jaza Exp $
+name = Category
+description = Allows you to structure your site and categorize content.
+package = Category
+core = 6.x
+
+; Information added by drupal.org packaging script on 2009-12-02
+version = "6.x-2.0-rc2"
+core = "6.x"
+project = "category"
+datestamp = "1259716812"
+

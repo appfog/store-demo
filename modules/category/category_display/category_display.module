@@ -1,0 +1,907 @@
+<?php
+// $Id: category_display.module,v 1.41 2009/12/02 00:04:30 jaza Exp $
+
+/**
+ * @file
+ * Allows additional output to be displayed and toggled for nodes controlled
+ * by the category module.
+ */
+
+/**
+ * Implementation of hook_help().
+ */
+function category_display_help($section) {
+  switch ($section) {
+    case 'admin/help#category_display':
+      return t('<p>The category display module allows additional output to be displayed and toggled for category and container nodes.</p>');
+  }
+}
+
+/**
+ * Implementation of hook_theme()
+ */
+function category_display_theme() {
+  return array(
+    'category_display_navigation' => array(
+      'arguments' => array('node' => NULL, 'container_info' => NULL, 'container' => NULL),
+      'template' => 'category-display-navigation',
+    ),
+    'category_display_menu_item_link' => array(
+      'arguments' => array('item' => NULL),
+    ),
+  );
+}
+
+/**
+ * Implementation of hook_nodeapi().
+ */
+function category_display_nodeapi(&$node, $op, $teaser = NULL, $page = NULL) {
+  switch ($op) {
+    case 'load':
+      $output = array();
+      $behavior = variable_get('category_behavior_'. $node->type, 0);
+
+      if (!empty($behavior) && $behavior == 'container') {
+        $output['category_display'] = (array) category_display_get_container($node->nid);
+      }
+
+      return $output;
+
+    case 'view':
+      if (!$teaser && $node->build_mode == NODE_BUILD_NORMAL) {
+        $behavior = variable_get('category_behavior_'. $node->type, 0);
+        $cnid = !empty($node->category['cnid']) ? $node->category['cnid'] : $node->nid;
+        $container = category_get_container($cnid);
+        if (!empty($behavior) && (!empty($node->category_menu_map['mlid']) || $container->hidden_cont)) {
+          $container_info = isset($node->category_display['navlinks']) ? ($node->category_display) : (array)category_display_get_container($cnid);
+          $container_info += isset($node->category_menu['links_for_cats']) ? ($node->category_menu) : (array)category_menu_get_container($cnid);
+          $container_info = (object) $container_info;
+          if (!empty($container_info->navlinks) || !empty($container_info->toc_for_cats) || !empty($container_info->nodelinks) || !empty($container_info->show_listing)) {
+            drupal_add_css(drupal_get_path('module', 'category_display') .'/category_display.css');
+            $node->content['category_display_navigation'] = array(
+              '#value' => theme('category_display_navigation', $node, $container_info, $container),
+              '#weight' => 100,
+            );
+          }
+        }
+      }
+      break;
+
+    case 'prepare':
+      $behavior = variable_get('category_behavior_'. $node->type, 0);
+      if (!empty($behavior) && $behavior == 'container') {
+
+        // Prepare defaults for the add/edit form.
+        if (empty($node->category_menu)) {
+          $node->category_menu = array();
+        }
+        if (empty($node->category_display)) {
+          $node->category_display = _category_display_defaults();
+        }
+      }
+      break;
+
+    case 'insert':
+    case 'update':
+      $behavior = variable_get('category_behavior_'. $node->type, 0);
+      if (!empty($behavior) && $behavior == 'container') {
+        category_display_save_container($node);
+      }
+      break;
+
+    case 'delete':
+      $behavior = variable_get('category_behavior_'. $node->type, 0);
+      if (!empty($behavior) && $behavior == 'container') {
+        category_display_del_container($node->nid);
+      }
+      break;
+  }
+}
+
+/**
+ * Implementation of hook_form_alter().
+ *
+ * Adds the category display settings to the container node form.
+ */
+function category_display_form_alter(&$form, $form_state, $form_id) {
+  if (isset($form['type']) && isset($form['#node']) && $form['type']['#value']
+  .'_node_form' == $form_id) {
+    // Add elements to the node form
+
+    $node = $form['#node'];
+    $behavior = variable_get('category_behavior_'. $node->type, 0);
+
+    if (!empty($behavior) && $behavior == 'container') {
+      $form['category']['display'] = _category_display_form_elements($node);
+      $form['#submit'][] = 'category_display_node_form_submit';
+    }
+  }
+}
+
+/**
+ * Defines the form elements that make up the category display fieldset on
+ * the container node form.
+ */
+function _category_display_form_elements($node) {
+  $form = array(
+    '#type' => 'fieldset',
+    '#title' => t('Navigation display'),
+    '#collapsible' => TRUE,
+    '#collapsed' => TRUE,
+    '#weight' => 6,
+  );
+
+  if ((empty($node->category['hierarchy']) || (int) $node->category['hierarchy'] < 2)) {
+    drupal_add_js("if (Drupal.jsEnabled) { $(document).ready(function() { $('#edit-category-update-category-display').css('display', 'none'); $('input.category-display-toc-for-cats').click(function() {if ( this.value == '1') { $('div#edit-category-display-toc-hidden-elements').show('medium'); } else { $('div#edit-category-display-toc-hidden-elements').hide('medium'); } }); $('input.category-display-show-listing').click(function() {if ( this.value == '1') { $('div#edit-category-display-listing-hidden-elements').show('medium'); } else { $('div#edit-category-display-listing-hidden-elements').hide('medium'); } }); $('input.category-menu-links-for-cats').click(function() {if ( this.value == '1') { $('div#edit-category-display-wrapper').show('medium'); $('div#edit-category-display-info-message').hide('medium'); } else { $('div#edit-category-display-wrapper').hide('medium'); $('div#edit-category-display-info-message').show('medium'); } });  }); }", 'inline');
+
+    if (empty($node->category_display['toc_for_cats'])) {
+      drupal_add_js("if (Drupal.jsEnabled) { $(document).ready(function() { $('div#edit-category-display-toc-hidden-elements').css('display', 'none'); }); }", 'inline');
+    }
+    if (empty($node->category_display['show_listing'])) {
+      drupal_add_js("if (Drupal.jsEnabled) { $(document).ready(function() { $('div#edit-category-display-listing-hidden-elements').css('display', 'none'); }); }", 'inline');
+    }
+    if (empty($node->category_menu['links_for_cats'])) {
+      drupal_add_js("if (Drupal.jsEnabled) { $(document).ready(function() { $('div#edit-category-display-wrapper').css('display', 'none'); }); }", 'inline');
+    }
+    else {
+      drupal_add_js("if (Drupal.jsEnabled) { $(document).ready(function() { $('div#edit-category-display-info-message').css('display', 'none'); }); }", 'inline');
+    }
+
+    $form['display_wrapper_start'] = array(
+      '#value' => '<div id="edit-category-display-wrapper">',
+    );
+
+    $form['navlinks'] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Show navigation links'),
+      '#default_value' => isset($node->category_display['navlinks']) ? $node->category_display['navlinks'] : 0,
+      '#description' => t('Displays navigation links (prev, next, and up) when you view a category in this container.'),
+    );
+
+    $form['toc_for_cats'] = array(
+      '#type' => 'radios',
+      '#title' => t('Show table of contents'),
+      '#default_value' => isset($node->category_display['toc_for_cats']) ? $node->category_display['toc_for_cats'] : 0,
+      '#options' => array(0 => t('Disabled'), 1 => t('Enabled')),
+      '#description' => t('Displays a table of contents (TOC) when you view a category in this container. The table of contents lists the children of the category being viewed.'),
+      '#attributes' => array('class' => 'category-display-toc-for-cats'),
+    );
+
+    $form['toc_hidden_start'] = array(
+      '#value' => '<div id="edit-category-display-toc-hidden-elements">',
+    );
+
+    $form['toc_depth'] = array(
+      '#type' => 'select',
+      '#title' => t('Depth of TOC'),
+      '#default_value' => isset($node->category_display['toc_depth']) ? $node->category_display['toc_depth'] : 0,
+      '#options' => _category_form_depth_options(10),
+      '#description' => t("The depth of a category's table of contents. A depth of 0 will show only the direct children of the category being viewed, a depth of 1 will show the grand-children of the category being viewed, and so on. An 'infinite' depth will show all descendants of the category being viewed."),
+    );
+    $form['toc_nodecount'] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Show tagged content count in TOC'),
+      '#default_value' => isset($node->category_display['toc_nodecount']) ? $node->category_display['toc_nodecount'] : 0,
+      '#description' => t('For each category shown in a table of contents, displays the number of content items that have been tagged with that category.'),
+    );
+
+    $form['toc_hidden_end'] = array(
+      '#value' => '</div>',
+    );
+
+    $form['nodelinks'] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Show links to categories on tagged content'),
+      '#default_value' => isset($node->category_display['nodelinks']) ? $node->category_display['nodelinks'] : 0,
+      '#description' => t('For content that has been tagged with one or more categories from this container, displays a link to the category when viewing the tagged content.'),
+    );
+
+    $form['show_listing'] = array(
+      '#type' => 'radios',
+      '#title' => t('Show content listings'),
+      '#options' => array(0 => t('Disabled'), 1 => t('Enabled')),
+      '#default_value' => isset($node->category_display['show_listing']) ? $node->category_display['show_listing'] : 0,
+      '#description' => t("Displays a listing of tagged content, when viewing a category in this container. Disabling this setting will also hide any alternative content listing that may be getting generated by the views module."),
+      '#attributes' => array('class' => 'category-display-show-listing'),
+    );
+
+    $form['listing_hidden_start'] = array(
+      '#value' => '<div id="edit-category-display-listing-hidden-elements">',
+    );
+
+    $form['emptymsg'] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Show message if no tagged content found'),
+      '#default_value' => isset($node->category_display['emptymsg']) ? $node->category_display['emptymsg'] : 0,
+      '#description' => t('Displays a message when viewing a category in this container, and when no listing of tagged content can be found. This message is never displayed on the container page, if this container has its depth set to 0.'),
+    );
+
+    $form['listing_hidden_end'] = array(
+      '#value' => '</div>',
+    );
+
+    $form['legacy_redirect'] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Redirect legacy URLs to proper category pages'),
+      '#default_value' => isset($node->category_display['legacy_redirect']) ? $node->category_display['legacy_redirect'] : 0,
+      '#description' => t("Legacy pages similar to core Taxonomy are provided by default (<em>category/xyz</em>, and <em>taxonomy/term/xyz</em> with Taxonomy wrapper module), but these are not equal to proper category pages, lacking navigation display elements, comments, node theming and more. Tick the above checkbox to redirect to a proper category page instead, if more consistent display is desired. Warning: Unlike the original, the redirected page can't process multiple categories at once."),
+    );
+
+    $form['display_wrapper_end'] = array(
+      '#value' => '</div>',
+    );
+
+    $form['info_message'] = array(
+      '#value' => '<div id="edit-category-display-info-message"><em>'. t('Navigation display cannot be used when menu links for categories are disabled. If you wish to use navigation display, you must enable menu links for categories.') .'</em></div>',
+    );
+  }
+  else {
+    $form['navlinks'] = array(
+      '#type' => 'value',
+      '#value' => 0,
+    );
+    $form['toc_for_cats'] = array(
+      '#type' => 'value',
+      '#value' => 0,
+    );
+    $form['toc_depth'] = array(
+      '#type' => 'value',
+      '#value' => array(),
+    );
+    $form['toc_nodecount'] = array(
+      '#type' => 'value',
+      '#value' => 0,
+    );
+    $form['nodelinks'] = array(
+      '#type' => 'value',
+      '#value' => 0,
+    );
+    $form['show_listing'] = array(
+      '#type' => 'value',
+      '#value' => 0,
+    );
+    $form['emptymsg'] = array(
+      '#type' => 'value',
+      '#value' => 0,
+    );
+
+    $form['info_message'] = array(
+      '#value' => '<em>'. t('Navigation display cannot be used in a multiple hierarchy container. If you wish to use navigation display, you must first modify the categories in this container such that each category has no more than one parent.') .'</em>',
+    );
+  }
+
+  return $form;
+}
+
+/**
+ * Additional form submit handler for node forms.
+ *
+ * Flattens the $form_state['values']['category']['display'] array
+ * on both submits and previews.
+ */
+function category_display_node_form_submit($form, &$form_state) {
+  $fieldsets = array(
+    'display' => TRUE,
+  );
+  if (!empty($form_state['values']['category']) && is_array($form_state['values']['category'])) {
+    foreach ($form_state['values']['category'] as $key => $value) {
+      if (isset($fieldsets[$key]) && is_array($value)) {
+        $fieldset = 'category_'. $key;
+        if (empty($form_state['values'][$fieldset])) {
+          $form_state['values'][$fieldset] = array();
+        }
+        $form_state['values'][$fieldset] = $value + $form_state['values'][$fieldset];
+
+        unset($form_state['values']['category'][$key]);
+      }
+    }
+  }
+}
+
+/**
+ * Implementation of hook_category_legacy().
+ */
+function category_display_category_legacy($op, &$vocabularies, $edit = NULL) {
+  switch ($op) {
+    case 'import_taxonomy_prepare':
+    case 'import_book_prepare':
+      foreach ($vocabularies as $vid => $vocab) {
+        $fields = array('navlinks', 'toc_for_cats', 'toc_depth', 'nodelinks', 'emptymsg', 'show_listing');
+        foreach ($fields as $field) {
+          $vocabularies[$vid][$field] = $edit[$field];
+        }
+        $vocabularies[$vid]['navlinks_before'] = ($edit['navlinks_distant']['navlinks_before'] ? 1 : 0);
+        $vocabularies[$vid]['navlinks_after'] = ($edit['navlinks_distant']['navlinks_after'] ? 1 : 0);
+      }
+      break;
+  }
+}
+
+/**
+ * Responds to the load of an existing container, by loading the container's
+ * display settings from the database.
+ *
+ * @param $nid
+ *   The node ID of the container being loaded.
+ *
+ * @return
+ *   The display settings for the specified node.
+ */
+function category_display_get_container($nid) {
+  $cache_key = 'cdisp_get_cont';
+  $container = category_cache_op('get', $nid, $cache_key);
+  if (!isset($container)) {
+
+    $result = db_query("SELECT * FROM {category_display} WHERE cid = %d", $nid);
+    $container = db_fetch_object($result);
+    if (empty($container)) {
+      $container = (object) _category_display_defaults();
+    }
+
+    category_cache_op('set', $nid, $cache_key, $container);
+  }
+  return $container;
+}
+
+/**
+ * Responds to the insert of update of an existing container, by updating the
+ * container's display settings in the database.
+ *
+ * @param $node
+ *   The container node being inserted or updated.
+ */
+function category_display_save_container($node) {
+  $new = !db_result(db_query('SELECT cid FROM {category_display} WHERE cid = %d', $node->nid));
+  $node->category_display['cid'] = $node->nid;
+
+  if ($new) {
+    drupal_write_record('category_display', $node->category_display);
+    $status = SAVED_NEW;
+  }
+  else {
+    drupal_write_record('category_display', $node->category_display, 'cid');
+    $status = SAVED_UPDATED;
+  }
+
+  category_cache_op('flush', $node->nid);
+  return $status;
+}
+
+/**
+ * Responds to the delete of an existing container, by deleting the container's
+ * display settings in the database.
+ *
+ * @param $nid
+ *   The node ID of the container being deleted.
+ */
+function category_display_del_container($nid) {
+  db_query('DELETE FROM {category_display} WHERE cid = %d', $nid);
+  category_cache_op('flush', $nid);
+}
+
+/**
+ * Helper function to provide default settings for new containers.
+ */
+function _category_display_defaults() {
+  return array(
+    'navlinks'        => 0,
+    'toc_for_cats'    => 0,
+    'toc_depth'       => 0,
+    'toc_nodecount'   => 0,
+    'nodelinks'       => 1,
+    'show_listing'    => 1,
+    'emptymsg'        => 1,
+    'legacy_redirect' => 0,
+  );
+}
+
+/**
+ * Process variables for category-display-navigation.tpl.php.
+ *
+ * The $variables array contains the following arguments:
+ * - $node
+ * - $category_display
+ * - $container
+ *
+ * @see category-display-navigation.tpl.php
+ */
+function template_preprocess_category_display_navigation(&$variables) {
+  $node = $variables['node'];
+  $menu_link = isset($node->category_menu_map) ? $node->category_menu_map : NULL;
+  $container_info = $variables['container_info'];
+  $container = $variables['container'];
+
+  // Provide extra variables for themers. Not needed by default.
+  $variables['container_id'] = $container->nid;
+  $variables['container_title'] = $container->title;
+  $variables['category_url'] = 'node/'. $container->nid;
+  $variables['current_depth'] = isset($menu_link['depth']) ? $menu_link['depth'] : NULL;
+
+  $variables['tree'] = '';
+  if ($container_info->toc_for_cats) {
+    $variables['tree'] = category_display_children($menu_link, $container_info);
+  }
+
+  if ($container_info->navlinks && isset($menu_link)) {
+    if ($prev = category_display_prev($menu_link)) {
+      $prev_href = url($prev['href']);
+      drupal_add_link(array('rel' => 'prev', 'href' => $prev_href));
+      $variables['prev_url'] = $prev_href;
+      $variables['prev_title'] = check_plain($prev['title']);
+    }
+    if ($menu_link['plid'] && $parent = category_menu_map_load($menu_link['plid'])) {
+      $parent_href = url($parent['href']);
+      drupal_add_link(array('rel' => 'up', 'href' => $parent_href));
+      $variables['parent_url'] = $parent_href;
+      $variables['parent_title'] = check_plain($parent['title']);
+    }
+    if ($next = category_display_next($menu_link, $container)) {
+      $next_href = url($next['href']);
+      drupal_add_link(array('rel' => 'next', 'href' => $next_href));
+      $variables['next_url'] = $next_href;
+      $variables['next_title'] = check_plain($next['title']);
+    }
+  }
+
+  $variables['has_links'] = FALSE;
+  // Link variables to filter for values and set state of the flag variable.
+  $links = array('prev_url', 'prev_title', 'parent_url', 'parent_title', 'next_url', 'next_title');
+  foreach ($links as $link) {
+    if (isset($variables[$link])) {
+      // Flag when there is a value.
+      $variables['has_links'] = TRUE;
+    }
+    else {
+      // Set empty to prevent notices.
+      $variables[$link] = '';
+    }
+  }
+}
+
+/**
+ * Fetches the menu link for the previous page of the book.
+ */
+function category_display_prev($book_link) {
+  // If the parent is zero, we are at the start of a book.
+  if ($book_link['plid'] == 0) {
+    return NULL;
+  }
+  $flat = category_display_get_flat_menu($book_link);
+  // Assigning the array to $flat resets the array pointer for use with each().
+  $curr = NULL;
+  do {
+    $prev = $curr;
+    list($key, $curr) = each($flat);
+  } while ($key && $key != $book_link['mlid']);
+
+  if ($key == $book_link['mlid']) {
+    // The previous page in the book may be a child of the previous visible link.
+    if ($prev['depth'] == $book_link['depth'] && $prev['has_children']) {
+      // The subtree will have only one link at the top level - get its data.
+      $data = array_shift(category_display_menu_subtree_data($prev));
+      // The link of interest is the last child - iterate to find the deepest one.
+      while ($data['below']) {
+        $data = end($data['below']);
+      }
+      return $data['link'];
+    }
+    else {
+      return $prev;
+    }
+  }
+}
+
+/**
+ * Fetches the menu link for the next page of the book.
+ */
+function category_display_next($book_link, $container) {
+  $flat = category_display_get_flat_menu($book_link);
+  // Assigning the array to $flat resets the array pointer for use with each().
+  do {
+    list($key, $curr) = each($flat);
+  } while ($key && $key != $book_link['mlid']);
+  if ($key == $book_link['mlid']) {
+    $ret = current($flat);
+
+    $include_link = TRUE;
+    if ($ret['router_path'] == 'node/%') {
+      $matches = array();
+      preg_match('/^node\/(\d+)$/', $ret['link_path'], $matches);
+      if (!empty($matches[1]) && $type = db_result(db_query("SELECT type FROM {node} WHERE nid = %d", $matches[1]))) {
+        if (db_result(db_query("SELECT type FROM {category_cont_node_types} WHERE cid = %d AND type = '%s'", $container->nid, $type))) {
+          $include_link = FALSE;
+        }
+      }
+    }
+
+    if ($include_link) {
+      return $ret;
+    }
+  }
+}
+
+/**
+ * Format the menu links for the child pages of the current page.
+ */
+function category_display_children($book_link, $container_info) {
+  $cache_key = 'cdisp_children'. $container_info->cid .':'. $book_link['mlid'];
+  $output = category_cache_op('get', 0, $cache_key);
+  if (!isset($output)) {
+
+    $book_link_orig = $book_link;
+
+    // If the TOC has more than one level, then we need to find a menu item with
+    // a specific depth. For example, if we want the TOC to be five levels deep,
+    // then we need to find a menu item at the fifth level of the hierarchy (or
+    // as close to it as possible). This menu item then gets passed to
+    // category_menu_tree_all_data(), so that it retrieves a menu hierarchy
+    // with the depth we need.
+    if ($container_info->toc_depth != 0 && isset($book_link)) {
+      if ($container_info->toc_depth == -1 || $container_info->toc_depth > MENU_MAX_DEPTH) {
+        $container_info->toc_depth = MENU_MAX_DEPTH;
+      }
+      $container_info->toc_depth += $book_link['depth'];
+      if ($book_link_new = _category_display_children_recurse($book_link, $container_info)) {
+        $book_link = $book_link_new;
+      }
+    }
+
+    $book_link = $book_link_orig;
+
+    $tree = array();
+
+    if (isset($book_link)) {
+      $tree = category_menu_tree_all_data($book_link_orig['menu_name'], $book_link, $container_info->toc_depth);
+    }
+    // When no menu link is provided to this function, we're generating a TOC
+    // for a hidden container. This is typically useful for things such as a site
+    // map. All of the below code is for the special case of hidden containers
+    // that have no menu link.
+    else {
+      $children = category_get_children($container_info->cid);
+      $containers_map = array();
+      if (!empty($children)) {
+        foreach (array_keys($children) as $child_cid) {
+          $child_cnid = !empty($children[$child_cid]->cnid) ? $children[$child_cid]->cnid : $child_cid;
+          $child_menu = category_menu_get_container($child_cnid);
+          $child_display = category_display_get_container($child_cnid);
+          $child_menu_map = _category_display_children_get_menu_map($children[$child_cid], $child_cnid);
+
+          if ($container_info->toc_depth != 0) {
+            if ($container_info->toc_depth == -1 || $container_info->toc_depth > MENU_MAX_DEPTH) {
+              $container_info->toc_depth = MENU_MAX_DEPTH;
+            }
+            $container_info->toc_depth += $child_menu_map['depth'];
+            $container_info->toc_depth--;
+            if ($child_menu_map_new = _category_display_children_recurse($child_menu_map, $container_info, 1, TRUE)) {
+              $child_menu_map = $child_menu_map_new;
+            }
+          }
+          else {
+            $container_info->toc_depth = $child_menu_map['depth'];
+            $container_info->toc_depth--;
+          }
+
+          if ($child_menu->links_for_cats && !isset($containers_map[$child_cnid])) {
+            $tree_new = category_menu_tree_all_data('category-menu-toc-'. $child_cnid, $child_menu_map, $container_info->toc_depth);
+            _category_display_children_prune_tagged_content($tree_new, $container_info);
+            $tree += $tree_new;
+            $containers_map[$child_cnid] = TRUE;
+          }
+        }
+
+        if (!$container_info->toc_depth) {
+          foreach (array_keys($tree) as $key) {
+            unset($tree[$key]['below']);
+          }
+        }
+      }
+    }
+
+    // We've retrieved a menu hierarchy with the desired depth. Now we set the
+    // menu link back to what it was originally, and we reduce the hierarchy so
+    // that it doesn't include the parents of the current page, or any menu links
+    // for assigned content.
+    if (isset($book_link)) {
+      $tree = _category_display_children_reduce($tree, $book_link, $container_info);
+    }
+
+    $output = $tree ? ($container_info->toc_nodecount ? category_display_menu_tree_output($tree) : menu_tree_output($tree)) : '';
+
+  category_cache_op('set', 0, $cache_key, $output);
+  }
+  return $output;
+}
+
+/**
+ * Helper function for category_display_children().
+ *
+ * Called only for the special case of hidden containers that have no menu link.
+ * For such cases, this function searches for a child category/container with
+ * a menu link, and returns the first one that it finds.
+ */
+function _category_display_children_get_menu_map($category, $cnid) {
+  if (empty($category->cnid) || $category->cnid == $cnid) {
+    if ($menu_map = category_menu_map_load_by_nid($category->cid)) {
+      return $menu_map;
+    }
+    else {
+      $children = category_get_children($category->cid);
+      if (!empty($children)) {
+        foreach (array_keys($children) as $child_cid) {
+          if ($menu_map = _category_display_children_get_menu_map($children[$child_cid], $cnid)) {
+            return $menu_map;
+          }
+        }
+      }
+    }
+  }
+
+  return NULL;
+}
+
+/**
+ * Helper function for category_display_children().
+ *
+ * Finds the menu item in the hierarchy that is as close as possible to being
+ * at the maximum depth allowed for this container's TOC depth. Recurses
+ * down until it finds such an item.
+ */
+function _category_display_children_recurse($book_link, $category_display, $curr_depth = 1, $is_hidden = FALSE) {
+  $book_link_new = NULL;
+
+  if ((!$is_hidden && $curr_depth <= $category_display->toc_depth) || ($is_hidden && $curr_depth < $category_display->toc_depth)) {
+    $result = db_query('SELECT ml.*, m.* FROM {menu_links} ml LEFT JOIN {menu_router} m ON m.path = ml.router_path WHERE ml.plid = %d', $book_link['mlid']);
+    while ($child_link = db_fetch_array($result)) {
+      $child_link['options'] = unserialize($child_link['options']);
+      $book_link_new = $child_link;
+      if ($ret = _category_display_children_recurse($book_link_new, $category_display, $curr_depth + 1)) {
+        return $ret;
+      }
+    }
+  }
+
+  return $book_link_new;
+}
+
+/**
+ * Helper function for category_display_children().
+ *
+ * Reduces a menu hierarchy so that it doesn't contain the current page or
+ * its parent, and so that it instead contains only the children of the current
+ * page.
+ */
+function _category_display_children_reduce($tree, $book_link, $category_display, $recurse = FALSE) {
+  $new_tree = array();
+
+  if (!empty($tree)) {
+    foreach (array_keys($tree) as $key) {
+      if ($tree[$key]['link']['plid'] == $book_link['mlid']) {
+        $new_tree[$key] = $tree[$key];
+      }
+      else {
+        if (!empty($tree[$key]['below'])) {
+          $new_tree += _category_display_children_reduce($tree[$key]['below'], $book_link, $category_display, TRUE);
+        }
+      }
+    }
+  }
+
+  if (!$recurse) {
+    _category_display_children_prune_tagged_content($new_tree);
+  }
+
+  return $new_tree;
+}
+
+/**
+ * Helper function for category_display_children().
+ *
+ * Prunes menu links for assigned content out of the hierarchy.
+ */
+function _category_display_children_prune_tagged_content(&$tree, $category_display = NULL) {
+  if (!empty($tree)) {
+    foreach (array_keys($tree) as $key) {
+      $include_link = TRUE;
+      if (isset($category_display) && $tree[$key]['link']['depth'] > ($category_display->toc_depth + 1)) {
+        $include_link = FALSE;
+      }
+      elseif ($tree[$key]['link']['router_path'] == 'node/%') {
+        $matches = array();
+        preg_match('/^node\/(\d+)$/', $tree[$key]['link']['link_path'], $matches);
+        if (!empty($matches[1]) && $type = db_result(db_query("SELECT type FROM {node} WHERE nid = %d", $matches[1]))) {
+          $behavior = variable_get('category_behavior_'. $type, 0);
+          if (empty($behavior)) {
+            $include_link = FALSE;
+          }
+        }
+      }
+
+      if (!$include_link) {
+        unset($tree[$key]);
+      }
+      elseif (!empty($tree[$key]['below'])) {
+        _category_display_children_prune_tagged_content($tree[$key]['below'], $category_display);
+      }
+    }
+  }
+}
+
+/**
+ * Get the book menu tree for a page, and return it as a linear array.
+ *
+ * @param $book_link
+ *   A fully loaded menu link that is part of the book hierarchy.
+ * @return
+ *   A linear array of menu links in the order that the links are shown in the
+ *   menu, so the previous and next pages are the elements before and after the
+ *   element corresponding to $node.  The children of $node (if any) will come
+ *   immediately after it in the array.
+ */
+function category_display_get_flat_menu(&$book_link) {
+  static $flat = array();
+
+  if (!isset($flat[$book_link['mlid']])) {
+    // Call menu_tree_all_data() to take advantage of the menu system's caching.
+    $tree = category_menu_tree_all_data($book_link['menu_name'], $book_link);
+    $flat[$book_link['mlid']] = array();
+    _category_display_flatten_menu($tree, $flat[$book_link['mlid']]);
+  }
+  return $flat[$book_link['mlid']];
+}
+
+/**
+ * Recursive helper function for book_get_flat_menu().
+ */
+function _category_display_flatten_menu($tree, &$flat) {
+  foreach ($tree as $data) {
+    if (!$data['link']['hidden']) {
+      $flat[$data['link']['mlid']] = $data['link'];
+      if ($data['below']) {
+        _category_display_flatten_menu($data['below'], $flat);
+      }
+    }
+  }
+}
+
+/**
+ * Get the data representing a subtree of the book hierarchy.
+ *
+ * The root of the subtree will be the link passed as a parameter, so the
+ * returned tree will contain this item and all its descendents in the menu tree.
+ *
+ * @param $item
+ *   A fully loaded menu link.
+ * @return
+ *   An subtree of menu links in an array, in the order they should be rendered.
+ */
+function category_display_menu_subtree_data($item) {
+  static $tree = array();
+
+  // Generate a cache ID (cid) specific for this $menu_name and $item.
+  $cid = 'links:'. $item['menu_name'] .':subtree-cid:'. $item['mlid'];
+
+  if (!isset($tree[$cid])) {
+    $cache = cache_get($cid, 'cache_menu');
+    if ($cache && isset($cache->data)) {
+      // If the cache entry exists, it will just be the cid for the actual data.
+      // This avoids duplication of large amounts of data.
+      $cache = cache_get($cache->data, 'cache_menu');
+      if ($cache && isset($cache->data)) {
+        $data = $cache->data;
+      }
+    }
+    // If the subtree data was not in the cache, $data will be NULL.
+    if (!isset($data)) {
+      $match = array("menu_name = '%s'");
+      $args = array($item['menu_name']);
+      $i = 1;
+      while ($i <= MENU_MAX_DEPTH && $item["p$i"]) {
+        $match[] = "p$i = %d";
+        $args[] = $item["p$i"];
+        $i++;
+      }
+      $sql = "
+        SELECT b.*, m.load_functions, m.to_arg_functions, m.access_callback, m.access_arguments, m.page_callback, m.page_arguments, m.title, m.title_callback, m.title_arguments, m.type, ml.*
+        FROM {menu_links} ml INNER JOIN {menu_router} m ON m.path = ml.router_path
+        INNER JOIN {book} b ON ml.mlid = b.mlid
+        WHERE ". implode(' AND ', $match) ."
+        ORDER BY p1 ASC, p2 ASC, p3 ASC, p4 ASC, p5 ASC, p6 ASC, p7 ASC, p8 ASC, p9 ASC";
+
+      $data['tree'] = menu_tree_data(db_query($sql, $args), array(), $item['depth']);
+      $data['node_links'] = array();
+      menu_tree_collect_node_links($data['tree'], $data['node_links']);
+      // Compute the real cid for book subtree data.
+      $tree_cid = 'links:'. $item['menu_name'] .':subtree-data:'. md5(serialize($data));
+      // Cache the data, if it is not already in the cache.
+      if (!cache_get($tree_cid, 'cache_menu')) {
+        cache_set($tree_cid, $data, 'cache_menu');
+      }
+      // Cache the cid of the (shared) data using the menu and item-specific cid.
+      cache_set($cid, $tree_cid, 'cache_menu');
+    }
+    // Check access for the current user to each item in the tree.
+    menu_tree_check_access($data['tree'], $data['node_links']);
+    $tree[$cid] = $data['tree'];
+  }
+
+  return $tree[$cid];
+}
+
+/**
+ * Returns a rendered menu tree.
+ *
+ * @param $tree
+ *   A data structure representing the tree as returned from menu_tree_data.
+ * @return
+ *   The rendered HTML of that data structure.
+ */
+function category_display_menu_tree_output($tree) {
+  $output = '';
+  $items = array();
+
+  // Pull out just the menu items we are going to render so that we
+  // get an accurate count for the first/last classes.
+  foreach ($tree as $data) {
+    if (!$data['link']['hidden']) {
+      $items[] = $data;
+    }
+  }
+
+  $num_items = count($items);
+  foreach ($items as $i => $data) {
+    $extra_class = NULL;
+    if ($i == 0) {
+      $extra_class = 'first';
+    }
+    if ($i == $num_items - 1) {
+      $extra_class = 'last';
+    }
+    $link = theme('category_display_menu_item_link', $data['link']);
+    if ($data['below']) {
+      $output .= theme('menu_item', $link, $data['link']['has_children'], category_display_menu_tree_output($data['below']), $data['link']['in_active_trail'], $extra_class);
+    }
+    else {
+      $output .= theme('menu_item', $link, $data['link']['has_children'], '', $data['link']['in_active_trail'], $extra_class);
+    }
+  }
+  return $output ? theme('menu_tree', $output) : '';
+}
+
+/**
+ * Generate the HTML output for a single menu link.
+ *
+ * @ingroup themeable
+ */
+function theme_category_display_menu_item_link($link) {
+  if (empty($link['localized_options'])) {
+    $link['localized_options'] = array();
+  }
+
+  $output = l($link['title'], $link['href'], $link['localized_options']);
+
+  if ($link['router_path'] == 'node/%') {
+    $matches = array();
+    preg_match('/^node\/(\d+)$/', $link['link_path'], $matches);
+    if (isset($matches[1])) {
+      $count = db_result(db_query("SELECT COUNT(nid) FROM {category_node} WHERE cid = %d", $matches[1]));
+      $output .= ' <span class="category-display-toc-node-count">('. $count .')</span>';
+    }
+  }
+
+  return $output;
+}
+
+/**
+ * Redirect the user from a legacy category page (category/% or taxonomy/term/%)
+ * to a fully-blown category page (node/%), if applicable.
+ * This is called directly from category_page().
+ */
+function category_display_legacy_page_redirect($cid) {
+  $node = node_load($cid);
+  $cnid = !empty($node->category['cnid']) ? $node->category['cnid'] : $node->nid;
+  $container_info = category_display_get_container($cnid);
+  if ($container_info->legacy_redirect) {
+    drupal_goto('node/'. $cid);
+  }
+}

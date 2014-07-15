@@ -1,0 +1,133 @@
+<?php
+// $Id: category_breadcrumb.module,v 1.3 2009/12/02 00:17:20 jaza Exp $
+
+/**
+ * @file
+ * Create breadcrumb-navigation on node-pages, based on Categories
+ */
+
+
+/*
+* Implementation of hook_menu (for admin settings only)
+*/
+function category_breadcrumb_menu() {
+  $items['admin/content/category/category_breadcrumb'] = array(
+    'title' => 'Breadcrumbs',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('category_breadcrumb_admin_settings'),
+    'access arguments' => array('administer site configuration'),
+    'type' => MENU_LOCAL_TASK,
+    'file' => 'category_breadcrumb.admin.inc',
+  );
+  return $items;
+}
+
+
+/**
+ * Implementation of hook_help().
+ */
+function category_breadcrumb_help($path, $arg) {
+  switch ($path) {
+    case 'admin/content/category/category_breadcrumb':
+      $output = t("The category_breadcrumb module adds breadcrumb navigation to your category and container pages, as well as categorized contents (i.e. node pages), so that it reflects your site's hiearchy of categories rather than menu links. The settings below may be used to change the behavior of category-based breadcrumbs.");
+      return $output;
+  }
+}
+
+
+/**
+ * Implementation of hook_nodeapi() - the main part of this module
+ */
+function category_breadcrumb_nodeapi(&$node, $op, $teaser = NULL, $page = NULL) {
+  if ($op == 'view' && $page && !drupal_is_front_page() && !in_array($node->type, explode(',', variable_get('category_breadcrumb_exclude', 'forum,blog')))) {
+
+    $add_title = variable_get('category_breadcrumb_title', 0);
+
+    // Viewing a node as page, not front: Check for existing breadcrumbs & excluded node-types
+    if (!drupal_set_breadcrumb()) {
+
+      // Handle node types with category/container behavior
+      if (!empty($node->category) && !empty($node->category['behavior'])) {
+        if (variable_get('category_breadcrumb_catpages', 1)) {
+          $crumbs[] = _category_breadcrumb_build($node, $add_title);
+        }
+      }
+      // All other node-types are content: One breadcrumb per category assigned
+      else {
+        $amount = variable_get('category_breadcrumb_amount', 1); 
+        if ($node->categories && $amount) {
+          foreach ($node->categories as $category) {
+            $crumbs[] = _category_breadcrumb_build($node, $add_title, $category);
+            if ($amount < 2)
+              break;  // If no multiple breadcrumbs, stop after the first
+          }
+        }
+      }
+    }
+
+    // Set breadcrumb, if we've created one
+    if ($crumbs) {
+
+// Drupal doesn't support multiple breadcrumbs, but as the default theming merely adds separators
+// between strings, we're able to pass our data through by splitting the wanted final output on
+// all occurences of the separator, then allow Drupal to re-unite it with any separator wanted.
+
+      // Multiple breadcrumbs as item-list, otherwise no change
+      $output = (count($crumbs) > 1) ? '<ul><li>'. implode('</li><li>', $crumbs) .'</li></ul>' : $crumbs[0];
+      drupal_set_breadcrumb(explode('»', $output));
+    }
+    // Even if no breadcrumb created, we may still want to append node-title for theming consistency
+    elseif ($add_title) {
+      $crumbs = drupal_get_breadcrumb();
+      $crumbs[] = ($add_title < 2) ? check_plain($node->title) : l($node->title, 'node/'.$node->nid);
+      drupal_set_breadcrumb($crumbs);
+    }
+  }
+}
+
+
+/**
+ * Build one breadcrumb-path
+ *   $node      = node currently viewed
+ *   $add_title = flag from admin settings
+ *   $category  = start-category for the path IF different from the node
+ */
+function _category_breadcrumb_build($node, $add_title, $category = NULL) {
+
+  // Add node-title
+  if ($add_title) {
+    $crumb[] = ($add_title < 2) ? check_plain($node->title) : l($node->title, 'node/'.$node->nid);
+  }
+
+  // Add starting-category, if different; else we're starting from node itself
+  if ($category) {
+    $cid = $category->cid;
+    $crumb[] = l($category->title, 'node/'.$cid);
+  }
+  else {
+    $cid = $node->nid;
+  }
+
+  // Add further parents, until no more left
+  do {
+    $parents = category_get_parents($cid, 'cid', FALSE);
+    $parent = reset($parents);
+    $cid = $parent->cid;
+    $hidden = 0;
+
+    if ($cid && !$parent->cnid) {
+      // This is a container. Since category_get_parents() doesn't fetch
+      // hidden_cont data in 6.x version, we need to check manually.
+      $data = db_fetch_object(db_query('SELECT hidden_cont FROM {category_cont} WHERE cid = %d', $cid));
+      $hidden = $data->hidden_cont;
+    }
+
+    if ($cid && !$hidden) {
+      $crumb[] = l($parent->title, 'node/'.$cid);
+    }
+  } while ($cid);
+
+  // Add 'Home' and join into string
+  $crumb[] = l(t('Home'), variable_get('site_frontpage', 'node'));
+  return implode('»', array_reverse($crumb));
+}

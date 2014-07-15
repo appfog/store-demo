@@ -1,0 +1,12 @@
+Drupal 6.x:
+ * "create categories", "create containers", "edit all categories", and "edit own categories" permissions are gone.
+   Categories and containers no longer are special node types. Use the regular set of node permissions in the "node" section
+   to control access.
+
+ * The category_display module now depends on category_menu. For some displays (such as the TOC tree)
+   to work properly, generated menu items must be enabled now (for containers and categories at a
+   minimum; you'll be able to put these into a hidden menu, so they don't show anywhere). You might need
+   to generate menu items for existing categories and/or nodes using the new category_resave module.
+
+ * The fieldset for custom menu links creation on node edit forms is suppressed now, as it's incompatible
+   with category_menu. Menu links should be created by either category_menu, or by the user - not both.

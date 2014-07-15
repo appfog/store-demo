@@ -1,0 +1,169 @@
+<?php
+// $Id: category_menu.install,v 1.8 2009/08/05 04:52:54 jaza Exp $
+
+/**
+ * @file
+ * Update file for the category_menu module. All functions in this
+ * file are implementations of hook_update_N(), unless indicated otherwise.
+ */
+
+/**
+ * Implementation of hook_install().
+ */
+function category_menu_install() {
+  drupal_install_schema('category_menu');
+  db_query("UPDATE {system} SET weight = 8 WHERE name = 'category_menu'");
+}
+
+/**
+ * Implementation of hook_disable().
+ */
+function category_menu_disable() {
+  drupal_set_message(t('The <em>category_menu</em> module is now disabled. This means that generated menu items are no longer maintained. In order to avoid future problems with outdated menu items, it\'s highly recommended to either enable <em>category_menu</em>, or <a href="!url">uninstall</a> it entirely (removes all generated menu items).', array('!url' => url('admin/build/modules/uninstall'))), 'warning');
+}
+
+/**
+ * Implementation of hook_uninstall().
+ */
+function category_menu_uninstall() {
+  drupal_uninstall_schema('category_menu');
+
+  $types = node_get_types('names');
+  foreach ($types as $type => $name) {
+    variable_del('category_menu_links_'. $type);
+  }
+  // Remove all generated menu links, as these are no longer maintained,
+  // and user can't delete them (only just disable).
+  db_query("DELETE FROM {menu_links} WHERE module = 'category_menu'");
+  menu_rebuild();
+}
+
+function category_menu_schema() {
+  $schema['category_menu'] = array(
+    'description' => 'Stores menu settings for containers.',
+    'fields' => array(
+      'cid' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'Primary Key: The {category}.cid of the container.',
+      ),
+      'links_for_cats' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'size' => 'tiny',
+        'description' => 'Whether or not generation of menu links for categories is enabled within the container. (0 = disabled, 1 = enabled)',
+      ),
+      'expanded_for_cats' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'size' => 'tiny',
+        'description' => "Whether or not generated menu links for categories should be set to 'expanded' within the container. (0 = disabled, 1 = enabled)",
+      ),
+      'plid_for_container' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => "The {menu_links}.mlid of a custom menu link to use as the parent of this container.",
+      ),
+      'menu_name' => array(
+        'type' => 'varchar',
+        'length' => 32,
+        'not null' => TRUE,
+        'default' => '',
+        'description' => 'The {menu_custom}.menu_name of the custom menu in which to generate menu links for this container and its categories. If set to the default empty string (which is interpreted as category-menu-toc-{node}.nid), this does not actually correspond to an entry in the {menu_custom} table.',
+      ),
+    ),
+    'primary key' => array('cid'),
+  );
+
+  $schema['category_menu_map'] = array(
+  'description' => 'Stores mappings of containers, categories, and assigned nodes to generated menu links. Uniquely connects each such node to a link in {menu_links}',
+    'fields' => array(
+      'mlid' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => "The node's {menu_links}.mlid.",
+      ),
+      'nid' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => "The node's {node}.nid.",
+      ),
+    ),
+    'primary key' => array('mlid'),
+    'unique keys' => array(
+      'nid' => array('nid'),
+    ),
+  );
+
+  return $schema;
+}
+
+/**
+ * Drupal 6 updates for the category_menu module.
+ */
+function category_menu_update_6000() {
+  $ret = array();
+
+  db_drop_field($ret, 'category_menu', 'item_for_cats');
+  db_drop_field($ret, 'category_menu', 'item_for_nodes');
+
+  db_add_field($ret, 'category_menu', 'links_for_cats', array('type' => 'int', 'unsigned' => TRUE, 'not null' => TRUE, 'default' => 0, 'size' => 'tiny'));
+  db_add_field($ret, 'category_menu', 'expanded_for_cats', array('type' => 'int', 'unsigned' => TRUE, 'not null' => TRUE, 'default' => 0, 'size' => 'tiny'));
+  db_add_field($ret, 'category_menu', 'plid_for_container', array('type' => 'int', 'unsigned' => TRUE, 'not null' => TRUE, 'default' => 0));
+
+  db_drop_table($ret, 'category_menu_map');
+  db_create_table($ret, 'category_menu_map', array(
+    'fields' => array(
+      'mlid' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'nid' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+    ),
+    'primary key' => array('mlid'),
+    'unique keys' => array(
+      'nid' => array('nid'),
+    ),
+  ));
+
+  return $ret;
+}
+
+/**
+ * Drupal 6 beta-1 update for the category_menu module.
+ */
+function category_menu_update_6001() {
+  $ret = array();
+
+  db_add_field($ret, 'category_menu', 'menu_name', array('type' => 'varchar', 'length' => 32, 'not null' => TRUE, 'default' => ''));
+
+  return $ret;
+}
+
+/**
+ * Ensure correct weight for category_menu module.
+ */
+function category_menu_update_6002() {
+  $ret = array();
+  $ret[] = update_sql("UPDATE {system} SET weight = 8 WHERE name = 'category_menu'");
+  return $ret;
+}

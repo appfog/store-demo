@@ -1,0 +1,12 @@
+; $Id: category_display.info,v 1.3 2008/07/19 14:56:43 jaza Exp $
+name = Category display
+description = Allows additional output to be displayed and toggled for category and container nodes.
+package = Category
+dependencies[] = category_menu
+core = 6.x
+; Information added by drupal.org packaging script on 2009-12-02
+version = "6.x-2.0-rc2"
+core = "6.x"
+project = "category"
+datestamp = "1259716812"
+

@@ -1,0 +1,599 @@
+<?php
+// $Id: category.install,v 1.26 2009/12/02 01:01:21 jaza Exp $
+
+/**
+ * @file
+ * Installation and update file for the category and related modules. All
+ * functions in this file are implementations of hook_update_N(), unless
+ * indicated otherwise.
+ */
+
+/**
+ * Implementation of hook_install().
+ */
+function category_install() {
+  drupal_install_schema('category');
+  $info = _category_default_node_types();
+  
+  node_type_save($info['category']);
+  node_type_save($info['container']);
+  
+  // Default category and container nodes to not be promoted and have comments
+  // disabled.
+  variable_set('node_options_category', array('status'));
+  variable_set('comment_category', COMMENT_NODE_DISABLED);
+  variable_set('node_options_container', array('status'));
+  variable_set('comment_container', COMMENT_NODE_DISABLED);
+
+  // Don't display date and author information for category and container nodes
+  // by default.
+  $theme_settings = variable_get('theme_settings', array());
+  $theme_settings['toggle_node_info_category'] = FALSE;
+  $theme_settings['toggle_node_info_container'] = FALSE;
+  variable_set('theme_settings', $theme_settings);
+  
+  variable_set('category_behavior_category', 'category');
+  variable_set('category_behavior_container', 'container');
+
+  // Explain about the wrapper modules installation, and the need of category_legacy import
+  // of pre-existing data, where applicable.
+  $types = array();
+  foreach (array('book' => 'book', 'taxonomy' => 'vocabulary') as $type => $table) {
+    if (db_table_exists($table) && db_result(db_query("SELECT count(*) FROM {". $table ."}"))) {
+      $types[] = $type;
+    }
+  }
+  drupal_set_message(t('The Category module was successfully installed. To use the new features properly with other modules depending on Book and/or Taxonomy, you should <a href="!path">install</a> Taxonomy and/or Book wrappers prior to enabling such modules. Beware that wrappers are significantly changing the way how books and taxonomies work.', array('!path' => url('admin/content/category/wrappers'))));
+  if (!empty($types)) {
+    drupal_set_message(t('Your site already have some %types data, needing to be converted using the category_legacy module (after the corresponding wrapper(s) have been installed), to become compatible with the newly installed Category system.', array('%types' => implode(t(' and '), $types))), 'warning');
+  }
+}
+
+/**
+ * Implementation of hook_uninstall().
+ */
+function category_uninstall() {
+  drupal_uninstall_schema('category');
+  
+  foreach (node_get_types() as $type) {
+    variable_del('category_behavior_'. $type->type);
+    variable_del('category_allowed_containers_'. $type->type);
+  }
+  
+  node_type_delete($info['category']);
+  node_type_delete($info['container']);
+}
+
+/**
+ * Get Category's built in node types.
+ * Internal.
+ */
+function _category_default_node_types() {
+  $types = array(
+    'category' => array(
+      'type' => 'category',
+      'name' => t('Category'),
+      'module' => 'node',
+      'description' => t("A <em>category</em> is used to structure your site, and to categorize content. You can create a category as the child of a container, or of another category. You can assign content to one or more categories."),
+      'title_label' => t('Name'),
+      'body_label' => t('Description'),
+      'custom' => TRUE,
+      'modified' => TRUE,
+      'locked' => FALSE,
+      'help' => '',
+      'min_word_count' => '',
+    ),
+    'container' => array(
+      'type' => 'container',
+      'name' => st('Container'),
+      'module' => 'node',
+      'description' => t('A <em>container</em> is usually the root of a category tree, but can also be created as the child of another container, or of a category. Containers are used for describing a particular way of classifying content.'),
+      'title_label' => t('Name'),
+      'body_label' => t('Description'),
+      'custom' => TRUE,
+      'modified' => TRUE,
+      'locked' => FALSE,
+      'help' => '',
+      'min_word_count' => '',
+    ),
+  );
+
+  foreach (array_keys($types) as $key) {
+    $types[$key] = (object) _node_type_set_defaults($types[$key]);
+  }
+
+  return $types;
+}
+
+/**
+ * Implementation of hook_schema().
+ */
+function category_schema() {
+  $schema['category'] = array(
+    'description' => 'Stores category information.',
+    'fields' => array(
+      'cid' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => "Primary key: The category's {node}.nid.",
+      ),
+      'cnid' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'The {category_cont}.cid of the container to which the category is assigned. (0 = category is a container)',
+      ),
+      'weight' => array(
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+        'size' => 'tiny',
+        'description' => 'The weight of this category in relation to other categories.',
+      ),
+      'depth' => array(
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+        'size' => 'tiny',
+        'description' => 'The depth of child categories that are reflected in node listings for this category.',
+      ),
+    ),
+    'primary key' => array('cid'),
+    'indexes' => array(
+      'cnid' => array('cnid'),
+      'weight' => array('weight'),
+    ),
+  );
+
+  $schema['category_hierarchy'] = array(
+    'description' => 'Stores the hierarchical relationship between categories.',
+    'fields' => array(
+      'cid' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'Primary Key: The {category}.cid of the category.',
+      ),
+      'parent' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => "Primary Key: The {category}.cid of the category's parent. 0 indicates no parent.",
+      ),
+    ),
+    'primary key' => array('cid', 'parent'),
+    'indexes' => array(
+      'parent' => array('parent'),
+    ),
+  );
+
+  $schema['category_node'] = array(
+    'description' => 'Stores the relationship of categories to nodes.',
+    'fields' => array(
+      'nid' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'The {node}.nid of the node.',
+      ),
+      'vid' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'Primary Key: The {node}.vid of the node.',
+      ),
+      'cid' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'Primary Key: The {category}.cid of a category assigned to the node.',
+      ),
+    ),
+    'primary key' => array('cid', 'vid'),
+    'indexes' => array(
+      'vid' => array('vid'),
+      'nid' => array('nid'),
+    ),
+  );
+
+  $schema['category_relation'] = array(
+    'description' => 'Stores non-hierarchical relationships between categories.',
+    'fields' => array(
+      'crid' => array(
+        'type' => 'serial',
+        'not null' => TRUE,
+        'description' => 'Primary Key: Unique category relation ID.',
+      ),
+      'cid1' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'The {category}.cid of the first category in a relationship.',
+      ),
+      'cid2' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'The {category}.cid of the second category in a relationship.',
+      ),
+    ),
+    'primary key' => array('crid'),
+    'unique keys' => array(
+      'cid1_cid2' => array('cid1', 'cid2'),
+    ),
+    'indexes' => array(
+      'cid2' => array('cid2'),
+    ),
+  );
+
+  $schema['category_synonym'] = array(
+    'description' => 'Stores category synonyms.',
+    'fields' => array(
+      'csid' => array(
+        'type' => 'serial',
+        'not null' => TRUE,
+        'description' => 'Primary Key: Unique category synonym ID.',
+      ),
+      'cid' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'The {category}.cid of the category.',
+      ),
+      'name' => array(
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => '',
+        'description' => 'The name of the synonym.',
+      ),
+    ),
+    'primary key' => array('csid'),
+    'indexes' => array(
+      'cid' => array('cid'),
+      'name_cid' => array('name', 'cid'),
+    ),
+  );
+
+  $schema['category_cont'] = array(
+    'description' => 'Stores container information.',
+    'fields' => array(
+      'cid' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'Primary Key: The {category}.cid of the container.',
+      ),
+      'admin_title' => array(
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => '',
+        'description' => 'Title of the container for administrative purposes.',
+      ),
+      'help' => array(
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => '',
+        'description' => 'Help text to display for the container.',
+      ),
+      'module' => array(
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => '',
+        'description' => 'The module which created the container.',
+      ),
+      'relations' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'size' => 'tiny',
+        'description' => 'Whether or not related categories are enabled within the container. (0 = disabled, 1 = enabled)',
+      ),
+      'synonyms' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'size' => 'tiny',
+        'description' => 'Whether or not synonyms for categories are enabled within the container. (0 = disabled, 1 = enabled)',
+      ),
+      'hierarchy' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'size' => 'tiny',
+        'description' => 'The type of hierarchy allowed within the container. (0 = disabled, 1 = single, 2 = multiple)',
+      ),
+      'multiple' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'size' => 'tiny',
+        'description' => 'Whether or not multiple categories from this container may be assigned to a node. (0 = disabled, 1 = enabled)',
+      ),
+      'required' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'size' => 'tiny',
+        'description' => 'Whether or not categories are required for nodes using this container. (0 = disabled, 1 = enabled)',
+      ),
+      'tags' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'size' => 'tiny',
+        'description' => 'Whether or not free tagging is enabled for the container. (0 = disabled, 1 = enabled)',
+      ),
+      'default_category_type' => array(
+        'type' => 'varchar',
+        'length' => 32,
+        'not null' => TRUE,
+        'default' => 'category',
+        'description' => 'Node type to be used for newly created categories within this container, if no user input given (such as freetagging and legacy Taxonomy operations).',
+      ),
+      'hidden_cont' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'size' => 'tiny',
+        'description' => 'Whether or not this container is hidden from your category hierarchy for end-users. (0 = disabled, 1 = enabled)',
+      ),
+      'allowed_parent' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => "The {category}.cid of a container whose categories the categories in this container may have as parents. (0 = this container or a category within it is an allowed parent)",
+      ),
+    ),
+    'primary key' => array('cid'),
+    'indexes' => array(
+      'admin_title' => array('admin_title'),
+      'allowed_parent' => array('allowed_parent'),
+    ),
+  );
+
+  $schema['category_cont_node_types'] = array(
+    'description' => "Stores which node types containers may be used with. (I.e. categories in container 'cid' may be used to tag content of type 'type'.)",
+    'fields' => array(
+      'cid' => array(
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+        'description' => 'Primary Key: the {category}.cid of the container.',
+      ),
+      'type' => array(
+        'type' => 'varchar',
+        'length' => 32,
+        'not null' => TRUE,
+        'default' => '',
+        'description' => 'The {node_type}.type of the node type for which the container may be used.',
+      ),
+    ),
+    'primary key' => array('cid', 'type'),
+    'indexes' => array(
+      'cid' => array('cid'),
+    ),
+  );
+
+  $schema['cache_category'] = drupal_get_schema_unprocessed('system', 'cache');
+  $schema['cache_category']['description'] = 'Cache table for category module, to store various preprocessed data, both per-node and global.';
+
+  return $schema;
+}
+
+/**
+ * Drupal 6 updates for the category module.
+ */
+function category_update_6000() {
+  $ret = array();
+
+  db_drop_field($ret, 'category', 'description');
+  db_drop_index($ret, 'category', 'tid');
+  db_add_index($ret, 'category', 'cnid', array('cnid'));
+
+  db_change_field($ret, 'category_cont', 'has_relations', 'relations', array('type' => 'int', 'unsigned' => TRUE, 'not null' => TRUE, 'default' => 0, 'size' => 'tiny'));
+  db_change_field($ret, 'category_cont', 'has_synonyms', 'synonyms', array('type' => 'int', 'unsigned' => TRUE, 'not null' => TRUE, 'default' => 0, 'size' => 'tiny'));
+  db_add_field($ret, 'category_cont', 'allowed_parent', array('type' => 'int', 'unsigned' => TRUE, 'not null' => TRUE, 'default' => 0));
+
+  $result = db_query('SELECT * FROM {category_cont_distant}');
+  while ($distant = db_fetch_object($result)) {
+    if (is_numeric($distant->allowed_parent)) {
+      db_query('UPDATE {category_cont} SET allowed_parent = %d WHERE cid = %d', $distant->allowed_parent, $distant->cid);
+    }
+  }
+
+  db_add_index($ret, 'category_cont', 'admin_title', array('admin_title'));
+  db_add_index($ret, 'category_cont', 'allowed_parent', array('allowed_parent'));
+  db_drop_table($ret, 'category_cont_distant');
+
+  db_add_index($ret, 'category_cont_node_types', 'cid', array('cid'));
+
+  db_drop_index($ret, 'category_hierarchy', 'nid');
+
+  db_drop_primary_key($ret, 'category_node');
+  db_drop_index($ret, 'category_node', 'nid');
+  db_drop_index($ret, 'category_node', 'cid');
+
+  db_add_field($ret, 'category_node', 'vid', array('type' => 'int', 'unsigned' => TRUE, 'not null' => TRUE, 'default' => 0));
+
+  $ret[] = update_sql('UPDATE {category_node} SET vid = (SELECT vid FROM {node} n WHERE {category_node}.nid = n.nid)');
+
+  db_add_primary_key($ret, 'category_node', array('cid, vid'));
+  db_add_index($ret, 'category_node', 'vid', array('vid'));
+  db_add_index($ret, 'category_node', 'nid', array('nid'));
+
+  db_drop_index($ret, 'category_relation', 'nid1');
+  db_drop_index($ret, 'category_relation', 'nid2');
+  db_add_field($ret, 'category_relation', 'crid', array('type' => 'serial', 'not null' => TRUE), array('primary key' => array('crid')));
+  db_add_index($ret, 'category_relation', 'cid1_cid2', array('cid1', 'cid2'));
+  db_add_index($ret, 'category_relation', 'cid2', array('cid2'));
+
+  db_drop_index($ret, 'category_synonym', 'nid');
+  db_drop_index($ret, 'category_synonym', 'name');
+  db_add_field($ret, 'category_synonym', 'csid', array('type' => 'serial', 'not null' => TRUE), array('primary key' => array('csid')));
+  db_add_index($ret, 'category_synonym', 'cid', array('cid'));
+  db_add_index($ret, 'category_synonym', 'name_cid', array('name', 'cid'));
+
+  $info = _category_default_node_types();
+  node_type_save($info['category']);
+  node_type_save($info['container']);
+  variable_set('category_behavior_category', 'category');
+  variable_set('category_behavior_container', 'container');
+  
+  $ret[] = update_sql("UPDATE {node} SET type = 'category' WHERE type = 'category_cat'");
+  $ret[] = update_sql("UPDATE {node} SET type = 'container' WHERE type = 'category_cont'");
+
+  variable_del('category_allow_nodetypes');
+  variable_del('category_base_nodetypes');
+  variable_del('category_distant_containers');
+  variable_del('book_maintain_db');
+  variable_del('taxonomy_maintain_db');
+  variable_del('category_menu_default_menu');
+
+  return $ret;
+}
+
+/**
+ * Transfer settings from old content types. This was added after beta 2
+ * release, so avoid changes to new variables possibly already there.
+ */
+function category_update_6001() {
+  $ret = array();
+
+  $candidates = db_query("SELECT name FROM {variable} WHERE name LIKE '%%\_category\_cat%%' OR name LIKE '%%\_category\_cont%%'");
+  while ($old_name = db_fetch_array($candidates)) {
+    $old_name = $old_name['name'];
+    $new_name = str_replace(array('_category_cat', '_category_cont'), array('_category', '_container'), $old_name);
+    if ($old_name != $new_name) {
+      $old_value = variable_get($old_name, NULL);
+      $new_value = variable_get($new_name, NULL);
+      if (isset($old_value) && !isset($new_value)) {
+        variable_set($new_name, $old_value);
+        $ret[] = array('success' => TRUE, 'query' => "variable_set($new_name)");
+      }
+      variable_del($old_name);
+      $ret[] = array('success' => TRUE, 'query' => "variable_del($old_name)");
+    }
+  }
+  return $ret;
+}
+
+/**
+ * Uninstall and remove Menu wrapper module, if present. The wrapper only existed in
+ * 6.x releases 6.x-2.0-beta3 and below.
+ */
+function category_update_6002() {
+  $ret = array();
+
+  $wrapper_path = drupal_get_path('module', 'category') .'/wrappers/menu';
+  if (is_dir($wrapper_path)) {
+    $success = TRUE;
+    $files = array('menu.admin.inc', 'menu.info', 'menu.info.php', 'menu.install', 'menu.install.php', 'menu.module', 'menu.module.php');
+    foreach ($files as $file) {
+      $filepath = $wrapper_path .'/'. $file;
+      if (is_file($filepath) && !@unlink($filepath)) {
+        $success = FALSE;
+      }
+    }
+    if (!@rmdir($wrapper_path)) {
+      $success = FALSE;
+    }
+
+    drupal_flush_all_caches();
+    module_rebuild_cache();
+
+    if (!$success) {
+      drupal_set_message("The attempt to remove <em>$wrapper_path</em> directory and all it's contents failed. Please ensure that the webserver have write permissions to the <em>wrappers</em> directory and below, and re-run the Category module's update 6002. If that's not possible, you might need to remove the files manually.", 'error');
+    }
+    $ret[] = array('success' => $success, 'query' => "Uninstall Menu wrapper, and remove $wrapper_path directory.");
+  }
+
+  return $ret;
+}
+
+/**
+ * Add cache table.
+ */
+function category_update_6003() {
+  $ret = array();
+
+  // This is verbatim from system module (minus descriptions), to avoid call to
+  // drupal_get_schema_unprocessed() which may change in future, per schema/updates
+  // guidelines.
+  $schema = array(
+    'fields' => array(
+      'cid' => array(
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => ''),
+      'data' => array(
+        'type' => 'blob',
+        'not null' => FALSE,
+        'size' => 'big'),
+      'expire' => array(
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0),
+      'created' => array(
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0),
+      'headers' => array(
+        'type' => 'text',
+        'not null' => FALSE),
+      'serialized' => array(
+        'type' => 'int',
+        'size' => 'small',
+        'not null' => TRUE,
+        'default' => 0)
+      ),
+    'indexes' => array('expire' => array('expire')),
+    'primary key' => array('cid'),
+  );
+
+  db_create_table($ret, 'cache_category', $schema);
+  return $ret;
+}
+
+/**
+ * Add a new column to {category_cont} table, to store newly added per-container setting
+ * of default node type for various shortcut category creations.
+ */
+function category_update_6004() {
+  $ret = array();
+
+  $new_field = array(
+    'type' => 'varchar',
+    'length' => 32,
+    'not null' => TRUE,
+    'default' => 'category',
+  );
+  db_add_field($ret, 'category_cont', 'default_category_type', $new_field);
+
+  return $ret;
+}

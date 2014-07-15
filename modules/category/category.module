@@ -1,0 +1,1981 @@
+<?php
+// $Id: category.module,v 1.167 2009/12/02 00:45:31 jaza Exp $
+
+/**
+ * @file
+ * Allows users to structure their site and organize content with categories.
+ */
+
+/**
+ * Implementation of hook_perm().
+ */
+function category_perm() {
+  return array('administer categories');
+}
+
+/**
+ * Implementation of hook_theme()
+ */
+function category_theme() {
+  return array(
+    'category_category_select' => array(
+      'arguments' => array('element' => NULL),
+    ),
+    'category_page' => array(
+      'arguments' => array('cids' => array(), 'result' => NULL),
+    ),
+    'category_overview_containers' => array(
+      'arguments' => array('form' => array()),
+    ),
+    'category_overview_categories' => array(
+      'arguments' => array('form' => array()),
+    ),
+    'category_wrapper_status' => array(
+      'arguments' => array('type' => NULL, 'status' => NULL),
+    ),
+  );
+}
+
+/**
+ * Implementation of hook_flush_caches()
+ */
+function category_flush_caches() {
+  return array('cache_category');
+}
+
+/**
+ * Implementation of hook_link().
+ *
+ * This hook is extended with $type = 'categories' to allow themes to
+ * print lists of categories associated with a node. Themes can print category
+ * links with:
+ *
+ * if (module_exists('category')) {
+ *   $categories = category_link('categories', $node);
+ *   print theme('links', $categories);
+ * }
+ */
+function category_link($type, $node = NULL, $teaser = FALSE) {
+  $links = array();
+
+  // 'Add child' links, a la book.module.
+  if ($type == 'node' && isset($node->category) && !$teaser) {
+    if ($node->status == 1 && $node->category['depth'] < MENU_MAX_DEPTH) {
+
+      // Always show 'Add child [container]' links
+      $types = _category_category_type_options();
+
+      if ($node->category['behavior'] == 'category') {
+        // Show 'Add child [category]' links on a category node only when we're
+        // not inside a free-tagging container. Show also types allowed through
+        // distant parenting (i.e. a container allowed for such a type allows
+        // this node to be a distant parent).
+        $container = category_get_container($node->category['cnid']);
+        if (!$container->tags) {
+          $types += _category_category_type_options($node->category['cnid'], TRUE);
+        }
+      }
+      else {
+        // Always show 'Add child [category]' links on a container node.
+        $types += _category_category_type_options($node->nid, FALSE);
+      }
+
+      // Build links for the collected node types, if accessible to current user.
+      foreach ($types as $type => $name) {
+        if (node_access('create', $type)) {
+          $links['category_add_'. $type] = array(
+            'title' => t('Add child @type', array('@type' => drupal_strtolower($name))),
+            'href' => 'node/add/'. str_replace('_', '-', check_plain($type)),
+            'query' => 'parent='. $node->nid,
+          );
+        }
+      }
+    }
+
+    return $links;
+  }
+
+  // Assigned category links, a la taxonomy.module.
+  if ($type == 'categories' && $node != NULL) {
+    // If previewing, the categories must be converted to objects first.
+    if ($node->build_mode == NODE_BUILD_PREVIEW) {
+      $node->categories = category_preview_categories($node);
+    }
+    if (isset($node->categories) && is_array($node->categories)) {
+      foreach ($node->categories as $category) {
+        // During preview the free tagging categories are in an array unlike the
+        // other categories which are objects. So we have to check if a $category
+        // is an object or not.
+        if (is_object($category)) {
+          $category_display = NULL;
+          if (module_exists('category_display')) {
+            $category_display = category_display_get_container($category->cnid);
+          }
+          if (!isset($category_display) || !empty($category_display->nodelinks)) {
+            $links['category_cat_'. $category->cid] = array(
+              'title' => $category->title,
+              'href' => category_category_path($category),
+              'attributes' => array(
+                'rel' => 'tag',
+                'title' => check_plain(strip_tags($category->description)),
+              ),
+            );
+          }
+        }
+        // Previewing free tagging categories; we don't link them because the
+        // category-page might not exist yet.
+        else {
+          foreach ($category as $free_typed) {
+            $typed_categories = drupal_explode_tags($free_typed);
+            $types_categories_count = 0;
+            foreach ($typed_categories as $typed_category) {
+              $links['category_preview_cat_'. $types_categories_count] = array(
+                'title' => $typed_category,
+              );
+              $types_categories_count++;
+            }
+          }
+        }
+      }
+    }
+
+    // We call this hook again because some modules and themes
+    // call category_link('categories') directly.
+    drupal_alter('link', $links, $node);
+
+    return $links;
+  }
+}
+
+/**
+ * Retrieve a list of applicable node types for various links and selections
+ * leading to creation of new categories and containers, based on behavior
+ * and allowed container settings for the existing types. If no usable node
+ * types for a container exists, a warning is printed.
+ *
+ * @param $cnid
+ *   Container to create the new categories in, or NULL if a container is
+ *   going to be created.
+ * @param $distant
+ *   For categories creation: Whether to retrieve node types allowed as
+ *   categories through the allowed distant parent setting (via another
+ *   allowed containers for given node type).
+ * @return
+ *   Array of human-readable node type names, keyed by machine-readable names.
+ */
+function _category_category_type_options($cnid = NULL, $distant = FALSE) {
+  $options = array();
+  $mode = is_null($cnid) ? 'container' : 'category';
+
+  foreach (node_get_types() as $type) {
+    $behavior = variable_get('category_behavior_'. $type->type, 0);
+    if (!empty($behavior) && $behavior == $mode) {
+      $allowed_containers = variable_get('category_allowed_containers_'. $type->type, array());
+
+      if ($mode == 'container') {
+        // Looking for node types with container behavior: Include them all.
+        $options[$type->type] = $type->name;
+      }
+      elseif (empty($allowed_containers) || in_array($cnid, $allowed_containers)) {
+        // Looking for node types with category behavior: Include the ones permitted
+        // locally by $allowed_containers.
+        $options[$type->type] = $type->name;
+      }
+      elseif ($distant) {
+        // This node type didn't match any of the above conditions. If looking also for
+        // node types (category behavior) allowed through potential distant parenting,
+        // check whether any of the containers allowed for this node type accepts the
+        // $cnid container for distant parenting.
+        foreach ($allowed_containers as $allowed_cnid) {
+          $allowed_container = category_get_container($allowed_cnid);
+          if (!empty($allowed_container->allowed_parent) && $allowed_container->allowed_parent == $cnid) {
+            $options[$type->type] = $type->name;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  // Show a warning about misconfiguration, if we have zero applicable node types.
+  // This means that there are either no types with container behavior, or no types
+  // with category behavior and given container allowed. Only print the message
+  // for users being able to fix the configuration of node types.
+  if (empty($options) && user_access('administer content types')) {
+    drupal_set_message(t('There are no usable content types with @behavior behavior. To allow for creation of @behavior items, you need to go to the !content-types page, and assign @behavior behavior to one or more of your content types.', array('!content-types' => l(t('administer content types'), 'admin/content/types'), '@behavior' => $mode)), 'warning', FALSE);
+  }
+
+  return $options;
+}
+
+/**
+ * For containers not maintained by category.module, give the maintaining
+ * module a chance to provide a path for categories in that container.
+ *
+ * @param $category
+ *   A category object.
+ * @return
+ *   An internal Drupal path.
+ */
+
+function category_category_path($category) {
+  if (function_exists('taxonomy_term_path')) {
+    $node = $category;
+    $node->category = (array) $category;
+    return taxonomy_term_path((object) _taxonomy_category_into_term($node));
+  }
+  return 'node/'. $category->cid;
+}
+
+/**
+ * Implementation of hook_menu().
+ */
+function category_menu() {
+  $items = array();
+
+  $items['admin/content/category'] = array(
+    'title' => 'Categories',
+    'description' => 'Manage category hierarchies and classification of your content.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('category_overview_containers'),
+    'access arguments' => array('administer categories'),
+    'file' => 'category.admin.inc',
+  );
+  $items['admin/content/category/list'] = array(
+    'title' => 'List',
+    'type' => MENU_DEFAULT_LOCAL_TASK,
+    'weight' => -10,
+  );
+  $items['admin/content/category/add'] = array(
+    'title' => 'Add container',
+    'page callback' => 'category_add_page',
+    'access arguments' => array('administer categories'),
+    'type' => MENU_LOCAL_TASK,
+    'weight' => -9,
+    'file' => 'category.admin.inc',
+  );
+  $items['admin/content/category/wrappers'] = array(
+    'title' => 'Wrapper modules',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('category_wrapper_admin_page'),
+    'access arguments' => array('administer categories'),
+    'type' => MENU_LOCAL_TASK,
+    'weight' => -8,
+    'file' => 'category.admin.inc',
+  );
+  $items['admin/content/category/%'] = array(
+    'title' => 'List categories',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('category_overview_categories', 3),
+    'access arguments' => array('administer categories'),
+    'type' => MENU_CALLBACK,
+    'file' => 'category.admin.inc',
+  );
+
+  $items['admin/content/category/%/list'] = array(
+    'title' => 'List',
+    'type' => MENU_DEFAULT_LOCAL_TASK,
+    'weight' => -10,
+  );
+  $items['admin/content/category/%/add'] = array(
+    'title' => 'Add category',
+    'page callback' => 'category_add_page',
+    'page arguments' => array(3),
+    'access arguments' => array('administer categories'),
+    'type' => MENU_LOCAL_TASK,
+    'weight' => -9,
+    'file' => 'category.admin.inc',
+  );
+
+  $items['category/%'] = array(
+    'title' => 'Category listing',
+    'page callback' => 'category_page',
+    'page arguments' => array(1),
+    'access arguments' => array('access content'),
+    'type' => MENU_CALLBACK,
+    'file' => 'category.pages.inc',
+  );
+  $items['node/%/feed'] = array(
+    'title' => 'RSS feed',
+    'page callback' => 'category_feed',
+    'page arguments' => array(1),
+    'access arguments' => array('access content'),
+    'type' => MENU_CALLBACK,
+    'file' => 'category.pages.inc',
+  );
+
+  $items['category/wrapper'] = array(
+    'title' => 'Category wrapper',
+    'page callback' => 'category_wrapper',
+    'access arguments' => array('administer categories'),
+    'type' => MENU_CALLBACK,
+    'file' => 'category.pages.inc',
+  );
+  $items['category/autocomplete'] = array(
+    'title' => 'Autocomplete category',
+    'page callback' => 'category_autocomplete',
+    'access arguments' => array('access content'),
+    'type' => MENU_CALLBACK,
+    'file' => 'category.pages.inc',
+  );
+  $items['category/js/form'] = array(
+    'page callback' => 'category_form_update',
+    'access arguments' => array('access content'),
+    'type' => MENU_CALLBACK,
+    'file' => 'category.pages.inc',
+  );
+  $items['category/js/distant/%/%'] = array(
+    'page callback' => 'category_distant_update',
+    'page arguments' => array(3, 4),
+    'access arguments' => array('access content'),
+    'type' => MENU_CALLBACK,
+    'file' => 'category.pages.inc',
+  );
+
+  return $items;
+}
+
+/**
+ * Implementation of hook_init(). Add's the category module's CSS.
+ */
+function category_init() {
+  drupal_add_css(drupal_get_path('module', 'category') .'/category.css');
+  module_load_include('inc', 'category');
+}
+
+/**
+ * Implementation of hook_form_alter().
+ *
+ * Adds the category or container fieldset to the node form.
+ *
+ * Also generates a form for selecting categories to associate with a node.
+ * We check for category_override_selector before loading the full
+ * category list, so contrib modules can intercept before hook_form_alter
+ *  and provide scalable alternatives.
+ */
+function category_form_alter(&$form, $form_state, $form_id) {
+  // Category node type behavior settings.
+  if ($form_id == 'node_type_form' && isset($form['identity']['type'])) {
+    $default_behavior = variable_get('category_behavior_'. $form['#node_type']->type, 0);
+    if ($default_behavior === 'container' || $default_behavior === 0) {
+      drupal_add_js("if (Drupal.jsEnabled) { $(document).ready(function() { $('div.form-item:has(div.category-allowed-containers)').css('display', 'none'); }); }", 'inline');
+    }
+    drupal_add_js("if (Drupal.jsEnabled) { $(document).ready(function() { $('input.category-behavior').click(function() {if ( this.value == 'category') { $('div.form-item:has(div.category-allowed-containers)').show('fast'); } else { $('div.form-item:has(div.category-allowed-containers)').hide('fast'); } }); }); }", 'inline');
+    $form['category'] = array(
+      '#type' => 'fieldset',
+      '#title' => t('Category settings'),
+      '#collapsible' => TRUE,
+      '#collapsed' => TRUE,
+    );
+    $behavior_disabled = FALSE;
+    $existing_nodes = 0;
+    if (!empty($default_behavior)) {
+      if ($existing_nodes = db_result(db_query("SELECT COUNT(c.cid) AS cid_count FROM {category} c INNER JOIN {node} n ON c.cid = n.nid WHERE n.type = '%s'", $form['#node_type']->type))) {
+        $behavior_disabled = TRUE;
+      }
+    }
+    $behavior_options = array(
+      0 => t('None'),
+      'category' => t('Category'),
+      'container' => t('Container'),
+    );
+    $count_message = format_plural($existing_nodes, t(' <strong>Note:</strong> this node type is already a @type, and there is %count node of this type that has corresponding @type information. You cannot change the behavior of this node type unless you delete the existing node.', array('@type' => drupal_strtolower($behavior_options[$default_behavior]), '%count' => $existing_nodes)), t(' <strong>Note:</strong> this node type is already a @type, and there are %count nodes of this type that have corresponding @type information. You cannot change the behavior of this node type unless you delete all of these nodes.', array('@type' => drupal_strtolower($behavior_options[$default_behavior]), '%count' => $existing_nodes)));
+    $form['category']['category_behavior'] = array(
+      '#type' => 'radios',
+      '#title' => t('Behavior'),
+      '#default_value' => $default_behavior,
+      '#required' => TRUE,
+      '#options' => $behavior_options,
+      '#description' => t('Attaches category or container behavior to this node type.') . ($behavior_disabled ? $count_message : ''),
+      '#attributes' => array('class' => 'category-behavior'),
+      '#disabled' => $behavior_disabled,
+    );
+    $form['category']['category_allowed_containers'] = array(
+      '#type' => 'checkboxes',
+      '#title' => t('Allowed containers'),
+      '#default_value' => variable_get('category_allowed_containers_'. $form['#node_type']->type, array()),
+      '#options' => _category_allowed_containers_options(),
+      '#description' => t('Applies only if this content type has its behavior set to \'category\'. If so, this specifies the containers that categories of this content type may belong to. Leave all options un-checked to allow all containers.'),
+      '#attributes' => array('class' => 'category-allowed-containers'),
+    );
+  }
+
+  // Category / container node add / edit form elements.
+  if (isset($form['type']) && isset($form['#node']) && $form['type']['#value'] .'_node_form' == $form_id) {
+    // Add elements to the node form
+    $node = $form['#node'];
+
+    if (isset($node->category)) {
+      $form['#submit'][] = 'category_node_form_submit';
+      _category_add_form_elements($form, $node);
+      $form['category']['hierarchy']['pick-container'] = array(
+        '#type' => 'submit',
+        '#value' => t('Change container (update list of parents)'),
+         // Submit the node form so the parent select options get updated.
+         // This is typically only used when JS is disabled.  Since the parent options
+         // won't be changed via AJAX, a button is provided in the node form to submit
+         // the form and generate options in the parent select corresponding to the
+         // selected book.  This is similar to what happens during a node preview.
+        '#submit' => array('node_form_submit_build_node'),
+        '#weight' => 5,
+      );
+    }
+  }
+
+  // Category selection form elements.
+  if (isset($form['type']) && isset($form['#node']) && (!variable_get('category_override_selector', FALSE)) && $form['type']['#value'] .'_node_form' == $form_id) {
+    $node = $form['#node'];
+
+    if (!isset($node->categories)) {
+      $categories = array();
+      if (!empty($node->nid)) {
+        $categories = category_node_get_categories($node);
+      }
+      else if (arg(0) == 'node' && arg(1) == 'add' && is_numeric(arg(3))) {
+        $categories[arg(3)] = category_get_category(arg(3));
+      }
+    }
+    else {
+      // After preview the categories must be converted to objects.
+      if (isset($form_state['node_preview'])) {
+        $node->categories = category_preview_categories($node);
+      }
+      $categories = $node->categories;
+    }
+
+    $c = db_query(db_rewrite_sql("SELECT n.nid, n.title, cn.*, c.weight FROM {category_cont} cn INNER JOIN {category_cont_node_types} nt ON cn.cid = nt.cid INNER JOIN {category} c ON cn.cid = c.cid INNER JOIN {node} n ON cn.cid = n.nid WHERE nt.type = '%s' ORDER BY c.weight, n.title", 'n', 'nid'), $node->type);
+    $containers = array();
+    $container_map = array();
+    $weight_offset = 0;
+
+    // Build list of non-free-tagging containers, all of which are
+    // candidates for AJAX distant-parent behavior.
+    while ($container = db_fetch_object($c)) {
+      $containers[] = $container;
+      end($containers);
+      $container_map[$container->cid] = key($containers);
+    }
+
+    foreach ($containers as $key => $container) {
+      if ($container->tags) {
+        if (isset($form_state['node_preview'])) {
+          // Typed string can be changed by the user before preview,
+          // so we just insert the tags directly as provided in the form.
+          $typed_string = $node->categories['tags'][$container->cid];
+        }
+        else {
+          $typed_string = category_implode_tags($categories, $container->cid) . (array_key_exists('tags', $categories) ? $categories['tags'][$container->cid] : NULL);
+        }
+        if ($container->help) {
+          $help = $container->help;
+        }
+        else {
+          $help = t('A comma-separated list of categories describing this content. Example: funny, bungee jumping, "Company, Inc.".');
+        }
+        $form['categories']['tags'][$container->cid] = array(
+          '#type' => 'textfield',
+          '#title' => $container->title,
+          '#description' => $help,
+          '#required' => $container->required,
+          '#default_value' => $typed_string,
+          '#autocomplete_path' => 'category/autocomplete/'. $container->cid,
+          '#weight' => $container->weight,
+          '#maxlength' => 255,
+        );
+      }
+      else {
+        // Extract categories belonging to the container in question.
+        $default_categories = array();
+        foreach ($categories as $category) {
+          // Free tagging has no default categories and also no container id after preview.
+          if (isset($category->cnid) && $category->cnid == $container->cid) {
+            $default_categories[$category->cid] = $category;
+          }
+        }
+        if (empty($default_categories)) {
+          $default_categories = array(0);
+        }
+
+        $parents = NULL;
+        // Find the default categories for the parent of this container -
+        // needed only for AJAX distant parent selection.
+        if (!empty($container->allowed_parent)) {
+          if (isset($containers[$container_map[$container->allowed_parent]])) {
+            $parent_cnid = $containers[$container_map[$container->allowed_parent]]->cid;
+            $parents_array = array();
+            foreach ($categories as $category) {
+              if (isset($category->cnid) && $category->cnid == $parent_cnid) {
+                $parents_array[] = $category->cid;
+              }
+            }
+
+            $parents = $parents_array;
+          }
+        }
+
+        $form['categories'][$container->cid] = category_form($container->cid, array_keys($default_categories), $container->help, 'category', $parents);
+        // Weight offset is used to leave 'extra room' between select elements,
+        // so that submit buttons can be added where necessary (for AJAX
+        // distant parent containers).
+        if ($weight_offset) {
+          $weight_offset *= 2;
+        }
+        $form['categories'][$container->cid]['#weight'] = (!empty($container->weight) ? $container->weight : 0) + $weight_offset;
+        if (!$weight_offset) {
+          $weight_offset = 1;
+        }
+        $form['categories'][$container->cid]['#required'] = TRUE;
+      }
+    }
+    if (!empty($form['categories']) && is_array($form['categories'])) {
+      if (count($form['categories']) > 1) {
+        // Add fieldset only if form has more than 1 element.
+        $form['categories'] += array(
+          '#type' => 'fieldset',
+          '#title' => t('Categories'),
+          '#collapsible' => TRUE,
+          '#collapsed' => FALSE,
+        );
+      }
+      $form['categories']['#weight'] = -3;
+      $form['categories']['#tree'] = TRUE;
+    }
+
+    for ($curr = 0; $curr < count($containers); $curr++) {
+      for ($cand = 0; $cand < count($containers); $cand++) {
+        if (!empty($containers[$cand]->allowed_parent) && $containers[$cand]->allowed_parent == $containers[$curr]->cid) {
+          // For any pair of container select lists on this form where one
+          // container has another as its distant parent, add an AHAH callback
+          // to the parent, and add a wrapper div to the child.
+          // NOTE: this will fail in cases where multiple containers share a
+          // single distant parent. In such cases, the AHAH behavior will only
+          // apply to the first child container. This is because Drupal's AHAH
+          // framework does not support affecting multiple elements in a single
+          // callback.
+          if (!isset($form['categories'][$containers[$curr]->cid]['#ahah'])) {
+            $form['categories'][$containers[$curr]->cid] += array(
+              '#ahah' => array(
+                'path' => 'category/js/distant/'. $containers[$curr]->cid .'/'. $containers[$cand]->cid,
+                'wrapper' => 'edit-category-'. $containers[$cand]->cid .'-wrapper',
+                'effect' => 'slide',
+              ),
+            );
+
+            $form['categories'][$containers[$cand]->cid] += array(
+              '#prefix' => '<div id="edit-category-'. $containers[$cand]->cid .'-wrapper" class="category-distant-wrapper">',
+              '#suffix' => '</div>',
+            );
+
+            $form['categories'][$containers[$curr]->cid .'-pick'] = array(
+              '#type' => 'submit',
+              '#value' => t('Update children of @parent', array(
+                '@parent' => $containers[$curr]->title)
+              ),
+               // Submit the node form so the child select options get updated.
+               // This is typically only used when JS is disabled.  Since the child options
+               // won't be changed via AJAX, a button is provided in the node form to submit
+               // the form and generate options in the child select corresponding to the
+               // appropriate container.  This is similar to what happens during a node preview.
+              '#submit' => array('node_form_submit_build_node'),
+              '#weight' => $form['categories'][$containers[$curr]->cid]['#weight'] + 1,
+            );
+
+            // Need this for AJAX.
+            if (!isset($form['categories']['#cache'])) {
+              $form['categories']['#cache'] = TRUE;
+            }
+            drupal_add_js("if (Drupal.jsEnabled) { $(document).ready(function() { $('#edit-categories-". $containers[$curr]->cid ."-pick').css('display', 'none'); }); }", 'inline');
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Additional form submit handler for category/container node forms.
+ *
+ * Flattens and processes the $form_state['values']['category'] array
+ * on both submits and previews. This is needed because
+ * the 'category' fieldset on the node form has to be 'tree = TRUE', but
+ * we don't want to deal with the fieldset hierarchy all the time.
+ */
+function category_node_form_submit($form, &$form_state) {
+  $fieldsets = array(
+    'hierarchy' => TRUE,
+    'advanced' => TRUE,
+    'identification' => TRUE,
+    'content_types' => TRUE,
+    'tagging' => TRUE,
+    'distant' => TRUE,
+  );
+  foreach ($form_state['values']['category'] as $key => $value) {
+    if (isset($fieldsets[$key]) && is_array($value)) {
+      $form_state['values']['category'] += $value;
+      unset($form_state['values']['category'][$key]);
+    }
+  }
+
+  if (!empty($form_state['values']['category']['cid']) && $form_state['values']['category']['cid'] == 'new') {
+    unset($form_state['values']['category']['cid']);
+  }
+
+  // Load the new parent for distant-parent category selection.
+  if (!empty($form_state['values']['op'])) {
+    $node = $form['#node'];
+    $containers = category_get_containers($node->type);
+    $is_valid_submission = FALSE;
+    foreach ($containers as $container) {
+      if ($form_state['values']['op'] == t('Update children of @parent', array('@parent' => $container->title))) {
+        $is_valid_submission = TRUE;
+      }
+    }
+
+    if ($is_valid_submission) {
+      foreach ($containers as $container) {
+        if (!empty($form_state['values']['categories'][$container->cid])) {
+          $post_categories = $form_state['values']['categories'][$container->cid];
+          if (!is_array($post_categories)) {
+            if (is_numeric($post_categories)) {
+              $post_categories = (int) $post_categories;
+              $node->categories[$post_categories] = category_get_category($post_categories);
+            }
+          }
+          else {
+            foreach ($post_categories as $post_category) {
+              if (is_numeric($post_category)) {
+                $post_category = (int) $post_category;
+                $node->categories[$post_category] = category_get_category($post_category);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Generate a form element for selecting categories from a container.
+ */
+function category_form($cnid, $value = 0, $help = NULL, $name = 'category',
+$parents = NULL) {
+  $container = category_get_container($cnid);
+  $help = ($help) ? $help : $container->help;
+
+  if (!$container->multiple) {
+    $blank = ($container->required) ? t('- Please choose -') : t('- None selected -');
+  }
+  else {
+    $blank = ($container->required) ? 0 : t('- None -');
+  }
+
+  return _category_category_select(check_plain($container->title), $name, $value, $cnid, $help, intval($container->multiple), $blank, array(), $parents);
+}
+
+/**
+ * Helper function to convert categories after a preview.
+ *
+ * After preview the tags are an array instead of proper objects. This function
+ * converts them back to objects with the exception of 'free tagging' categories,
+ * because new tags can be added by the user before preview and those do not
+ * yet exist in the database. We therefore save those tags as a string so
+ * we can fill the form again after the preview.
+ */
+function category_preview_categories($node) {
+  $categories = array();
+  if (isset($node->categories)) {
+    foreach ($node->categories as $key => $category) {
+      unset($node->categories[$key]);
+      // A 'Multiple select' and a 'Free tagging' field returns an array.
+      if (is_array($category)) {
+        foreach ($category as $cid) {
+          if ($key == 'tags') {
+            // Free tagging; the values will be saved for later as strings
+            // instead of objects to fill the form again.
+            $categories['tags'] = $category;
+          }
+          else {
+            $categories[$cid] = category_get_category($cid);
+          }
+        }
+      }
+      // A 'Single select' field returns the category id.
+      elseif ($category) {
+        $categories[$category] = category_get_category($category);
+      }
+    }
+  }
+  return $categories;
+}
+
+/**
+ * Provides category information for rss feeds.
+ */
+function category_rss_item($node) {
+  $output = array();
+  foreach ($node->categories as $cat) {
+    $is_included = TRUE;
+    if (module_exists('category_display')) {
+      $cont = category_display_get_container($cat->cnid);
+      if (!$cont->nodelinks) {
+        $is_included = FALSE;
+      }
+    }
+
+    if ($is_included) {
+      $output[] = array(
+        'key'   => 'category',
+        'value' => check_plain($cat->title),
+        'attributes' => array(
+          'domain' => url('node/'. $cat->cid, array('absolute' => TRUE))
+        ),
+      );
+    }
+  }
+  return $output;
+}
+
+/**
+ * Make sure incoming cnids are free tagging enabled.
+ */
+function category_node_validate(&$node) {
+  if (!empty($node->categories)) {
+    $categories = $node->categories;
+    if (!empty($categories['tags'])) {
+      foreach ($categories['tags'] as $cnid => $cnid_value) {
+        $container = category_get_container($cnid);
+        if (empty($container->tags)) {
+          // see form_get_error $key = implode('][', $element['#parents']);
+          // on why this is the key
+          form_set_error("categories][tags][$cnid", t('The %title container can not be modified in this way.', array('%title' => $container->title)));
+        }
+      }
+    }
+    else {
+      foreach ($categories as $cnid => $category) {
+        if (empty($category)) {
+          $container = category_get_container($cnid);
+          if ($container->required) {
+            form_set_error("categories][$cnid", t('You must choose a category from %container.', array('%container' => $container->title)));
+          }
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Save category associations for a given node.
+ */
+function category_node_save($node, $categories) {
+  global $user;
+
+  category_node_delete_revision($node);
+
+  // Free tagging containers do not send their cids in the form,
+  // so we'll detect them here and process them independently.
+  if (isset($categories['tags'])) {
+    $typed_input = $categories['tags'];
+    unset($categories['tags']);
+
+    foreach ($typed_input as $cnid => $cnid_value) {
+      $typed_cats = drupal_explode_tags($cnid_value);
+
+      $inserted = array();
+      foreach ($typed_cats as $typed_cat) {
+        // See if the term exists in the chosen container
+        // and return the cid, otherwise, add a new record.
+        $possibilities = category_get_category_by_name($typed_cat);
+        $typed_cat_cid = NULL; // cid match if any.
+        foreach ($possibilities as $possibility) {
+          if ($possibility->cnid == $cnid) {
+            $typed_cat_cid = $possibility->cid;
+          }
+        }
+
+        if (!$typed_cat_cid) {
+          $container = category_get_container($cnid);       
+          $tag_node = new stdClass();
+          $tag_node->title = $typed_cat;
+          $tag_node->type = $container->default_category_type;
+          $tag_node->category['cnid'] = $cnid;
+          $tag_node->category['parents'][0] = $cnid;
+          $node_options = variable_get('node_options_'. $tag_node->type, array('status', 'promote'));
+          $tag_node->status = in_array('status', $node_options);
+          $tag_node->promote = in_array('promote', $node_options);
+          $tag_node->sticky = in_array('sticky', $node_options);
+          $tag_node->revision = in_array('revision', $node_options);
+          $tag_node->name = $user->name ? $user->name : 0;
+          $tag_node->date = date('j M Y H:i:s');
+          $tag_node = node_submit($tag_node);
+          node_save($tag_node);
+          $typed_cat_cid = $tag_node->nid;
+        }
+
+        // Defend against duplicate, differently cased tags
+        if (!isset($inserted[$typed_cat_cid])) {
+          db_query('INSERT INTO {category_node} (nid, vid, cid) VALUES (%d, %d, %d)', $node->nid, $node->vid, $typed_cat_cid);
+          $inserted[$typed_cat_cid] = TRUE;
+        }
+      }
+    }
+  }
+
+  if (is_array($categories)) {
+    foreach ($categories as $key => $cat) {
+      if ($key != 'tags') {
+        if (is_array($cat)) {
+          foreach ($cat as $cid) {
+            if (!empty($cid)) {
+              db_query('INSERT INTO {category_node} (nid, vid, cid) VALUES (%d, %d, %d)', $node->nid, $node->vid, $cid);
+            }
+          }
+        }
+        else if (isset($cat->cid)) {
+          db_query('INSERT INTO {category_node} (nid, vid, cid) VALUES (%d, %d, %d)', $node->nid, $node->vid, $cat->cid);
+        }
+        else if ($cat) {
+          db_query('INSERT INTO {category_node} (nid, vid, cid) VALUES (%d, %d, %d)', $node->nid, $node->vid, $cat);
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Remove associations of a node to its categories.
+ */
+function category_node_delete($node) {
+  db_query('DELETE FROM {category_node} WHERE nid = %d', $node->nid);
+  category_cache_op('flush', $node->nid);
+}
+
+/**
+ * Remove associations of a node to its terms.
+ */
+function category_node_delete_revision($node) {
+  db_query('DELETE FROM {category_node} WHERE vid = %d', $node->vid);
+  category_cache_op('flush', $node->nid);
+}
+
+/**
+ * Implementation of hook_node_type().
+ */
+function category_node_type($op, $info) {
+  if ($op == 'update' && !empty($info->old_type) && $info->type != $info->old_type) {
+    db_query("UPDATE {category_cont_node_types} SET type = '%s' WHERE type = '%s'", $info->type, $info->old_type);
+    db_query("UPDATE {category_cont} SET default_category_type = '%s' WHERE default_category_type = '%s'", $info->type, $info->old_type);
+    $allowed_containers = variable_get('category_allowed_containers_'. $info->old_type, array());
+    variable_del('category_allowed_containers_'. $info->old_type);
+    if (!empty($allowed_containers)) {
+      variable_set('category_allowed_containers_'. $info->type, $allowed_containers);
+    }
+
+    $behavior = variable_get('category_behavior_'. $info->old_type, 0);
+    variable_del('category_behavior_'. $info->old_type);
+    if (!empty($behavior)) {
+      variable_set('category_behavior_'. $info->type, $behavior);
+    }
+  }
+  elseif ($op == 'delete') {
+    db_query("UPDATE {category_cont} SET default_category_type = '%s' WHERE default_category_type = '%s'", 'category', $info->type);
+    db_query("DELETE FROM {category_cont_node_types} WHERE type = '%s'", $info->type);
+    variable_del('category_allowed_containers_'. $info->type);
+    variable_del('category_behavior_'. $info->type);
+  }
+}
+
+/**
+ * Implementation of hook_nodeapi().
+ *
+ * Handles category loading, inserting and updating.
+ */
+function category_nodeapi(&$node, $op, $teaser, $page) {
+  // Ensure that category.inc is loaded. We generally do that in hook_init(),
+  // but some faulty modules might call a node_load() even before that runs.
+  module_load_include('inc', 'category');
+
+  switch ($op) {
+    case 'load':
+      $output = array();
+      $behavior = variable_get('category_behavior_'. $node->type, 0);
+      if (!empty($behavior)) {
+        if ($behavior == 'category') {
+          $output['category'] = (array) category_get_category($node->nid);
+        }
+        else {
+          $output['category'] = (array) category_get_container($node->nid);
+        }
+        $output['category']['parents'] = category_get_parents($node->nid);
+        $output['category']['behavior'] = $behavior;
+      }
+      $output['categories'] = category_node_get_categories($node);
+      return $output;
+
+    case 'view':
+      if (!$teaser) {
+        $behavior = variable_get('category_behavior_'. $node->type, 0);
+        if (isset($behavior) && $node->build_mode == NODE_BUILD_NORMAL && ($listing = category_node_listing($node))) {
+          $node->content['category_listing'] = array(
+            '#value' => $listing,
+            '#weight' => 100,
+          );
+        }
+      }
+      break;
+
+    case 'prepare':
+      $behavior = variable_get('category_behavior_'. $node->type, 0);
+      if (!empty($behavior)) {
+        // Prepare defaults for the add/edit form.
+        if (empty($node->category)) {
+          $node->category = array();
+          if (empty($node->nid) && isset($_GET['parent']) &&
+          is_numeric($_GET['parent'])) {
+            // Handle "Add child page" links:
+            $parent = category_get_category($_GET['parent']);
+            if (!empty($parent)) {
+              $cnid = !empty($parent->cnid) ? $parent->cnid : $parent->cid;
+              $parent_container = category_get_container($cnid);
+              $allowed_containers = variable_get('category_allowed_containers_'. $node->type, array());
+              if (empty($parent->category['allowed_parent'])) {
+                $node->category['container'] = $cnid;
+              }
+              else {
+                $allowed_key = array_search(
+                $parent->category['allowed_parent'], $allowed_containers);
+                $node->category['container'] = ($allowed_key !== FALSE) ? $allowed_containers[$allowed_key] : $cnid;
+              }
+              $node->category['parents'] = array($parent->nid => $parent->nid);
+            }
+          }
+          if (isset($node->category['container']) && !isset($node->category['original_container'])) {
+            $node->category['original_container'] = $node->category['container'];
+          }
+          // Set defaults.
+          $node->category += _category_defaults(!empty($node->nid) ? $node->nid : 'new');
+        }
+        else {
+          $node->category['container'] = !empty($node->category['container']) ?$node->category['container'] : (!empty($node->category['cnid']) ? $node->category['cnid'] : NULL);
+          if (empty($node->category['container']) && !empty($node->category['parents']) && $behavior == 'container') {
+            reset($node->category['parents']);
+            $first_parent = current($node->category['parents']);
+            $node->category['container'] = (!empty($first_parent->cnid) ? $first_parent->cnid : $first_parent->cid);
+          }
+          if (isset($node->category['container']) && !isset($node->category['original_container'])) {
+            $node->category['original_container'] = $node->category['container'];
+          }
+        }
+        // Find the depth limit for the parent select.
+        if (isset($node->category['container']) && !isset($node->category['parent_depth_limit'])) {
+          $node->category['parent_depth_limit'] = (MENU_MAX_DEPTH - 1);
+        }
+        $node->category['behavior'] = $behavior;
+      }
+      break;
+
+    case 'insert':
+    case 'update':
+      $behavior = variable_get('category_behavior_'. $node->type, 0);
+      if (!empty($behavior)) {
+        if ($behavior == 'category') {
+          category_save_category($node);
+        }
+        else {
+          category_save_container($node);
+        }
+      }
+
+      if (!empty($node->categories)) {
+        category_node_save($node, _category_filter_pick_elements($node->categories));
+      }
+      break;
+
+    case 'delete':
+      $behavior = variable_get('category_behavior_'. $node->type, 0);
+      if (!empty($behavior)) {
+        if ($behavior == 'category') {
+          category_del_category($node->nid);
+        }
+        else {
+          category_del_container($node->nid);
+        }
+      }
+
+      category_node_delete($node);
+      break;
+
+    case 'delete revision':
+      category_node_delete_revision($node);
+      break;
+
+    case 'validate':
+      category_node_validate($node);
+      break;
+
+    case 'rss item':
+      return category_rss_item($node);
+
+    case 'update index':
+      return category_node_update_index($node);
+  }
+}
+
+/**
+ * Implementation of hook_nodeapi('update_index').
+ */
+function category_node_update_index(&$node) {
+  $output = array();
+  if (!empty($node->category)) {
+    foreach ($node->category as $cat) {
+      $output[] = $cat->title;
+    }
+  }
+  if (count($output)) {
+    return '<strong>('. implode(', ', $output) .')</strong>';
+  }
+}
+
+/**
+ * A recursive helper function for category_toc().
+ */
+function _category_toc_recurse($tree, $indent, &$toc, $exclude, $depth_limit) {
+  foreach ($tree as $data) {
+    if (($data->depth + 1) > $depth_limit) {
+      // Don't iterate through any links on this level.
+      break;
+    }
+    if (!in_array($data->cid, $exclude)) {
+      $toc[$data->cid] = str_repeat($indent, $data->depth + 1) .' '. truncate_utf8($data->title, 30, TRUE, TRUE);
+    }
+  }
+}
+
+/**
+ * Returns an array of container children in table of contents order.
+ *
+ * @param $container
+ *   The ID of the container whose children are to be listed.
+ * @param $exclude
+ *   Optional array of nid values.  Any category whose nid is in this array
+ *   will be excluded (along with its children).
+ * @param $depth_limit
+ *   Any category deeper than this value will be excluded (along with its children).
+ * @return
+ *   An array of nid, title pairs for use as options for selecting a category.
+ */
+function category_toc($container, $exclude = array(), $depth_limit) {
+  $tree = category_get_tree($container);
+  $container = category_get_container($container);
+  if (!in_array($container->cid, $exclude)) {
+    $toc[$container->cid] = $container->title;
+  }
+  _category_toc_recurse($tree, '--', $toc, $exclude, $depth_limit);
+
+  return $toc;
+}
+
+/**
+ * Saves a container to the database. This function is called when node_save()
+ * is run on a node that has container behavior.
+ */
+function category_save_container(&$node) {
+  $new = empty($node->category['cid']);
+  $node->category['cid'] = $node->nid;
+  $node->category['cnid'] = 0;
+  $node->category['nodes'] = empty($node->category['nodes']) ? array() : $node->category['nodes'];
+
+  if (!isset($node->category['module'])) {
+    $node->category['module'] = 'category';
+  }
+  if (!empty($node->category['parents']) && !is_array($node->category['parents'])) {
+    $node->category['parents'] = array($node->category['parents'] => TRUE);
+  }
+  if (empty($node->category['parents'])) {
+    $node->category['parents'] = array(0 => TRUE);
+  }
+
+  if ($new) {
+    // Insert new.
+    drupal_write_record('category', $node->category);
+    drupal_write_record('category_cont', $node->category);
+    $status = SAVED_NEW;
+  }
+  else {
+    drupal_write_record('category', $node->category, 'cid');
+    drupal_write_record('category_cont', $node->category, 'cid');
+    db_query("DELETE FROM {category_cont_node_types} WHERE cid = %d", $node->category['cid']);
+    db_query("DELETE FROM {category_hierarchy} WHERE cid = %d", $node->category['cid']);
+    $status = SAVED_UPDATED;
+  }
+
+  foreach ($node->category['nodes'] as $type => $selected) {
+    if (!empty($selected)) {
+      db_query("INSERT INTO {category_cont_node_types} (cid, type) VALUES (%d, '%s')", $node->category['cid'], $type);
+    }
+  }
+  foreach ($node->category['parents'] as $parent => $selected) {
+    if (!empty($selected)) {
+      db_query("INSERT INTO {category_hierarchy} (cid, parent) VALUES (%d, %d)", $node->category['cid'], $parent);
+    }
+  }
+
+  category_cache_op('flush', 'all');
+  return $status;
+}
+
+/**
+ * Delete a container.
+ *
+ * @param $cid
+ *   A container's node ID.
+ * @return
+ *   Constant indicating items were deleted.
+ */
+function category_del_container($cid) {
+  db_query('DELETE FROM {category} WHERE cid = %d', $cid);
+  db_query('DELETE FROM {category_hierarchy} WHERE cid = %d', $cid);
+  db_query('DELETE FROM {category_cont} WHERE cid = %d', $cid);
+  db_query('DELETE FROM {category_cont_node_types} WHERE cid = %d', $cid);
+
+  foreach (node_get_types() as $type) {
+    $allowed_containers = variable_get('category_allowed_containers_'. $type->type, array());
+
+    if (!empty($allowed_containers) && is_array($allowed_containers)) {
+      $allowed_key = array_search($cid, $allowed_containers);
+      if ($allowed_key !== FALSE) {
+        unset($allowed_containers[$allowed_key]);
+        variable_set('category_allowed_containers_'. $type->type, $allowed_containers);
+      }
+    }
+  }
+
+  category_cache_op('flush', 'all');
+  return SAVED_DELETED;
+}
+
+/**
+ * Dynamically check and update the hierarachy flag of a container.
+ *
+ * Checks the current parents of all categories in a container and updates the
+ * container's hierarchy setting to the lowest possible level. A hierarchy with
+ * no parents in any of its categories will be given a hierarchy of 0. If categories
+ * contain at most a single parent, the container will be given a hierarchy of
+ * 1. If any category contains multiple parents, the container will be given a
+ * hieararchy of 2.
+ *
+ * Note: We're not inheriting the core taxonomy code here, because our workflow
+ * is different in that we save category data in hook_nodeapi() rather than in a
+ * form submit handler, so we can't use form values. Also the code is simplified.
+ *
+ * @param $cnid
+ *   The container to be updated.
+ * @param $hierarchy
+ *   Known minimum hierarchy suggested by a recently changed category (if any),
+ *   to help avoiding an expensive query. This is not a final value, but it's
+ *   needed to increase the hierarchy from initial zero. Values higher than 2
+ *   will be reduced.
+ */
+function category_update_container_hierarchy($cnid, $hierarchy = 0) {
+  $container = category_get_container($cnid);
+
+  if ($hierarchy < $container->hierarchy) {
+    // Retrieve the new value for hierarchy field afresh, as the biggest of all
+    // parent counts for categories in this container, reduced to maximum value
+    // of 2. Exclude the root (container) parent, if there's none other.
+    $result = db_fetch_array(db_query('SELECT h.cid, COUNT(h.parent) AS parents, MAX(ABS(h.parent - %d)) AS not_cont_only FROM {category_hierarchy} h INNER JOIN {category} c ON h.cid = c.cid WHERE c.cnid = %d GROUP BY h.cid ORDER BY parents DESC, not_cont_only DESC LIMIT 1', $cnid, $cnid));
+    $hierarchy = $result['not_cont_only'] ? $result['parents'] : 0;
+  }
+  $hierarchy = min($hierarchy, 2);
+
+  // Update the container, if we got a different hierarchy.
+  if ($hierarchy != $container->hierarchy) {
+    $container->hierarchy = $hierarchy;
+    $node = new StdClass();
+    $node->nid = $container->cid;
+    $node->category = (array) $container;
+    category_save_container($node);
+    // TODO: Allow Taxonomy wrapper to take an action, too.
+  }
+}
+
+/**
+ * Saves a category to the database. This function is called when node_save()
+ * is run on a node that has category behavior.
+ */
+function category_save_category(&$node) {
+  $new = empty($node->category['cid']);
+
+  // Before we save anything, retrieve the container this category used to
+  // be in previously, if any.
+  $old_cnid = NULL;
+  if (!$new) {
+    $old_category = category_get_category($node->nid);
+    $old_cnid = $old_category->cnid;
+  }
+
+  $node->category['cid'] = $node->nid;
+
+  if (empty($node->category['cnid'])) {
+    $node->category['cnid'] = $node->category['container'];
+  }
+  if (empty($node->category['parents'])) {
+    $node->category['parents'] = array($node->category['cnid']);
+  }
+
+  if ($new) {
+    // Insert new.
+    drupal_write_record('category', $node->category);
+    $status = SAVED_NEW;
+  }
+  else {
+    drupal_write_record('category', $node->category, 'cid');
+    db_query("DELETE FROM {category_hierarchy} WHERE cid = %d", $node->category['cid']);
+    db_query('DELETE FROM {category_relation} WHERE cid1 = %d OR cid2 = %d', $node->category['cid'], $node->category['cid']);
+    db_query('DELETE FROM {category_synonym} WHERE cid = %d', $node->category['cid']);
+    $status = SAVED_UPDATED;
+  }
+
+  $parents = array();
+  if (is_array($node->category['parents'])) {
+    foreach ($node->category['parents'] as $parent) {
+      if (is_array($parent)) {
+        foreach ($parent as $cid) {
+          db_query('INSERT INTO {category_hierarchy} (cid, parent) VALUES (%d, %d)', $node->category['cid'], $cid);
+          $parents[$cid] = TRUE;
+        }
+      }
+      else if (is_object($parent)) {
+        db_query('INSERT INTO {category_hierarchy} (cid, parent) VALUES (%d, %d)', $node->category['cid'], $parent->cid);
+        $parents[$parent->cid] = TRUE;
+      }
+      else {
+        db_query('INSERT INTO {category_hierarchy} (cid, parent) VALUES (%d, %d)', $node->category['cid'], $parent);
+        $parents[$parent] = TRUE;
+      }
+    }
+  }
+  else {
+    db_query('INSERT INTO {category_hierarchy} (cid, parent) VALUES (%d, %d)', $node->category['cid'], $node->category['parents']);
+  }
+
+  if (!empty($node->category['relations'])) {
+    foreach ($node->category['relations'] as $related_id) {
+      if ($related_id != 0) {
+        db_query('INSERT INTO {category_relation} (cid1, cid2) VALUES (%d, %d)', $node->category['cid'], $related_id);
+      }
+    }
+  }
+
+  if (!empty($node->category['synonyms'])) {
+    foreach (explode("\n", str_replace("\r", '', $node->category['synonyms'])) as $synonym) {
+      if ($synonym) {
+        db_query("INSERT INTO {category_synonym} (cid, name) VALUES (%d, '%s')", $node->category['cid'], chop($synonym));
+      }
+    }
+  }
+
+  // Update the hierarchy flag on affected container(s).
+  if (!empty($old_cnid) && $node->category['cnid'] != $old_cnid) {
+    category_update_container_hierarchy($old_cnid);
+  }
+  if (count($parents) == 1) {
+    // The container (root) parent doesn't count, if there's none other.
+    unset($parents[$node->category['cnid']]);
+  }
+  category_update_container_hierarchy($node->category['cnid'], count($parents));
+
+  category_cache_op('flush', 'all');
+  return $status;
+}
+
+/**
+ * Delete a category.
+ *
+ * @param $cid
+ *   The category ID.
+ * @return
+ *   Status constant indicating deletion.
+ */
+function category_del_category($cid) {
+  $old_category = category_get_category($cid);
+
+  db_query('DELETE FROM {category} WHERE cid = %d', $cid);
+  db_query('DELETE FROM {category_hierarchy} WHERE cid = %d', $cid);
+  db_query('DELETE FROM {category_relation} WHERE cid1 = %d OR cid2 = %d', $cid, $cid);
+  db_query('DELETE FROM {category_synonym} WHERE cid = %d', $cid);
+  db_query('DELETE FROM {category_node} WHERE cid = %d', $cid);
+
+  category_update_container_hierarchy($old_category->cnid);
+
+  category_cache_op('flush', 'all');
+  return SAVED_DELETED;
+}
+
+/**
+ * Return an array with default values for a category.
+ */
+function _category_defaults($nid) {
+  return array(
+    'original_container' => NULL,
+    'cid' => $nid,
+    'container' => 0,
+    'parents' => array(0),
+    'weight' => 0,
+    'help' => '',
+    'hidden_cont' => 0,
+    'depth' => 0,
+    'hierarchy' => 0,
+    'relations' => 0,
+    'synonyms' => 0,
+    'tags' => 0,
+    'multiple' => 0,
+    'required' => 0,
+    'allowed_parent' => 0,
+    'nodes' => array(),
+    'admin_title' => '',
+  );
+}
+
+/**
+ * Build the parent selection form element for the add/edit category/container
+ * node form
+ *
+ * This function is also called when generating a new set of options during the
+ * AJAX callback, so an array is returned that can be used to replace an existing
+ * form element.
+ */
+function _category_parent_select($category_link) {
+  if (variable_get('menu_override_parent_selector', FALSE)) {
+    return array();
+  }
+  // Offer a message or a drop-down to choose a different container.
+  $form = array(
+    '#type' => 'hidden',
+    '#value' => 0,
+    '#prefix' => '<div id="edit-category-hierarchy-parent-wrapper">',
+    '#suffix' => '</div>',
+  );
+
+  if (!$category_link['container']) {
+    // This is a container - at the top level.
+    if ($category_link['original_container'] == $category_link['container']) {
+      $form['#prefix'] .= '<em>'. t('This is a top-level container.') .'</em>';
+    }
+    else {
+      $form['#prefix'] .= '<em>'. t('This will be a top-level container.') .'</em>';
+    }
+  }
+  else {
+    if (!empty($category_link['tags']) && $category_link['behavior'] == 'category') {
+      if ($category_link['original_container'] == $category_link['container']) {
+        $form['#prefix'] .= '<em>'. t('Because this is a free-tagging category, it has its container set as its parent.') .'</em>';
+      }
+      else {
+        $form['#prefix'] .= '<em>'. t('Because this is a free-tagging category, it will have its container set as its parent.') .'</em>';
+      }
+      $form['#value'] = $category_link['container'];
+    }
+    else {
+      $exclude = array($category_link['cid']);
+      $parent = $category_link['container'];
+
+      // If the container of the current node has an allowed distant parent, then
+      // generate the list based on the distant container instead of based on the
+      // actual container. Also exclude the distant container itself from the
+      // list.
+      if (!empty($category_link['allowed_parent']) && $category_link['behavior'] == 'category') {
+        $parent = $category_link['allowed_parent'];
+        $exclude[] = $category_link['allowed_parent'];
+      }
+      // If no default parent is given, then set it to the container.
+      elseif (empty($category_link['parents'])) {
+        $category_link['parents'] = array($parent);
+      }
+      $options = category_toc($parent, $exclude, $category_link['parent_depth_limit']);
+
+      if (!empty($options)) {
+        if ($category_link['original_container'] != $category_link['container'] && $category_link['original_container'] != $category_link['allowed_parent']) {
+          $category_link['parents'] = array(0 => key($options));
+        }
+        $form = array(
+          '#type' => 'select',
+          '#title' => t('Parents'),
+          '#default_value' => $category_link['parents'],
+          '#multiple' => TRUE,
+          '#required' => TRUE,
+          '#description' => t('The parent categories in the hierarchy. The maximum depth for a category and all children is !maxdepth. Some categories in the selected hierarchy may not be available as parents if selecting them would exceed this limit.', array(
+            '!maxdepth' => MENU_MAX_DEPTH,
+          )),
+          '#options' => $options,
+          '#attributes' => array('class' => 'category-title-select'),
+        );
+      }
+      else {
+        $form['#prefix'] .= '<em>'. t('No parents available for this container.') .'</em>';
+      }
+    }
+  }
+  return $form;
+}
+
+/**
+ * Build the common elements of the add/edit category/container forms.
+ */
+function _category_add_form_elements(&$form, $node) {
+  // Need this for AJAX.
+  $form['#cache'] = TRUE;
+  drupal_add_js("if (Drupal.jsEnabled) { $(document).ready(function() { $('#edit-category-hierarchy-pick-container').css('display', 'none'); }); }", 'inline');
+  $node->category['behavior'] = variable_get('category_behavior_'. $node->type, 0);
+  $is_container = ($node->category['behavior'] === 'container');
+
+  if (empty($node->category['parents'])) {
+    $node->category['parents'] = array();
+  }
+  $node->category['parents'] = array_keys($node->category['parents']);
+
+  $form['category'] = array(
+    '#type' => 'fieldset',
+    '#title' => ($is_container ? t('Container information') : t('Category information')),
+    '#weight' => 10,
+    '#collapsible' => TRUE,
+    '#collapsed' => TRUE,
+    '#tree' => TRUE,
+    '#attributes' => array('class' => 'category-form'),
+  );
+  foreach (array('cid', 'original_container', 'parent_depth_limit', 'behavior') as $key) {
+    $form['category'][$key] = array(
+      '#type' => 'value',
+      '#value' => $node->category[$key],
+    );
+  }
+
+  $form['category']['hierarchy'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('Hierarchy'),
+    '#weight' => -10,
+    '#collapsible' => TRUE,
+    '#collapsed' => FALSE,
+  );
+
+  $options = array();
+  $distant = array();
+  $tags_map = array();
+  $nid = isset($node->nid) ? $node->nid : 'new';
+
+  if (isset($node->nid) && ($nid == $node->category['original_container']) && ($node->category['parent_depth_limit'] == 0)) {
+    // This is the top level node in a maximum depth hierarchy and thus cannot be moved.
+    $options[$node->nid] = $node->title;
+  }
+  else {
+    $allowed_containers = variable_get('category_allowed_containers_'. $node->type, array());
+    foreach (category_get_containers() as $container) {
+      if ((empty($node->nid) || $node->nid != $container->nid) && (empty($allowed_containers) || in_array($container->nid, $allowed_containers))) {
+        $options[$container->nid] = $container->title;
+      }
+      if (!$is_container) {
+        $distant[$container->nid] = $container->allowed_parent;
+        $tags_map[$container->nid] = $container->tags;
+      }
+    }
+  }
+
+  if ($is_container) {
+    // Containers do not have to have a parent.
+    $options = array(0 => '<'. t('none') .'>') + $options;
+  }
+  else {
+    $form['category']['allowed_parents_map'] = array(
+      '#type' => 'value',
+      '#value' => $distant,
+    );
+    $form['category']['tags_map'] = array(
+      '#type' => 'value',
+      '#value' => $tags_map,
+    );
+  }
+
+  // Add a drop-down to select the destination parent.
+  $description_container = t('Make a selection here if you want to choose a distant parent for this container. Leave blank if you do not want this container to have any parent.');
+  $description_category = t('Your category will be a part of the selected hierarchy.');
+  if (!$is_container && empty($options)) {
+    $form['category']['hierarchy']['container'] = array(
+      '#type' => 'markup',
+      '#prefix' => '<div class="error">',
+      '#value' => '<em>'. t('There are no containers available. You must create a container before you can create categories.') .'</em>',
+      '#suffix' => '</div>',
+    );
+  }
+  else {
+    if ((empty($node->category['container']) || !isset($options[$node->category['container']])) && !$is_container) {
+      $node->category['container'] = key($options);
+    }
+    $form['category']['hierarchy']['container'] = array(
+      '#type' => 'select',
+      '#title' => t('Container'),
+      '#default_value' => $node->category['container'],
+      '#options' => $options,
+      '#access' => (bool)$options,
+      '#description' => ($is_container ? $description_container : $description_category),
+      '#weight' => -5,
+      '#attributes' => array('class' => 'category-title-select'),
+      '#ahah' => array(
+        'path' => 'category/js/form',
+        'wrapper' => 'edit-category-hierarchy-parent-wrapper',
+        'effect' => 'slide',
+      ),
+    );
+    if (!$is_container && $node->category['parents'][0] == 0 && !isset($node->category['parents'][1])) {
+      $node->category['parents'] = array(0);
+    }
+    if (!$is_container && isset($form['category']['allowed_parents_map']['#value'][$node->category['container']])) {
+      $node->category['allowed_parent'] = $form['category']['allowed_parents_map']['#value'][$node->category['container']];
+    }
+    if (!$is_container && isset($form['category']['tags_map']['#value'][$node->category['container']])) {
+      $node->category['tags'] = $form['category']['tags_map']['#value'][$node->category['container']];
+    }
+    $form['category']['hierarchy']['parents'] = _category_parent_select($node->category);
+    if (!isset($form['category']['hierarchy']['parents']['#prefix'])) {
+      $form['category']['hierarchy']['parents']['#prefix'] = '<div id="edit-category-hierarchy-parent-wrapper">';
+      $form['category']['hierarchy']['parents']['#suffix'] = '</div>';
+    }
+  }
+
+  $form['category']['hierarchy']['weight'] = array(
+    '#type' => 'weight',
+    '#title' => t('Weight'),
+    '#default_value' => $node->category['weight'],
+    '#delta' => 15,
+    '#weight' => 10,
+    '#description' => t('Categories and containers at a given level are ordered first by weight and then by title.'),
+  );
+  if ($is_container) {
+    $form['category']['hierarchy']['hidden_cont'] = array(
+      '#type' => 'radios',
+      '#title' => t('Hidden container'),
+      '#default_value' => $node->category['hidden_cont'],
+      '#options' => array(1 => t('Enabled'), 0 => t('Disabled')),
+      '#weight' => 15,
+      '#description' => t('Make this container \'hidden\'. A hidden container exists within a category hierarchy, but is invisible to end-users. For example, a hidden container does not have a menu item generated by category_menu, and it is not shown in navigational elements provided by category_display. This hidden behaviour applies only to the container itself, not to its child categories or to their assigned nodes.'),
+    );
+    $form['category']['hierarchy']['#collapsed'] = TRUE;
+  }
+  $form['category']['hierarchy']['depth'] = array(
+    '#type' => 'select',
+    '#title' => t('Depth'),
+    '#default_value' => $node->category['depth'],
+    '#options' => _category_form_depth_options(10),
+    '#weight' => 20,
+    '#description' => t('The depth of child categories that a node listing reflects. Set this to \'infinite\' to reflect an infinite depth. Although a container cannot be assigned nodes, it can still list nodes of child categories, if it has a depth that is not 0.'),
+  );
+
+  $form['body_field']['body']['#rows'] = 5;
+
+  if ($is_container) {
+    $form['category']['identification'] = array(
+      '#type' => 'fieldset',
+      '#title' => t('Identification'),
+      '#collapsible' => TRUE,
+      '#collapsed' => TRUE,
+    );
+    $form['category']['identification']['help'] = array(
+      '#type' => 'textfield',
+      '#title' => t('Help text'),
+      '#maxlength' => 255,
+      '#default_value' => $node->category['help'],
+      '#description' => t('Instructions to present to the user when selecting categories, e.g., <em>"Enter a comma separated list of words"</em>.'),
+    );
+    $form['category']['identification']['admin_title'] = array(
+      '#type' => 'textfield',
+      '#title' => t('Admin title'),
+      '#default_value' => !empty($node->category['has_admin_title']) ? $node->category['admin_title'] : '',
+      '#maxlength' => 255,
+      '#description' => t('A title for this container that will be used within administrative interfaces, such as selection lists and tabular listings. If this is left blank, the actual title will be used instead.'),
+    );
+
+    $form['category']['content_types'] = array(
+      '#type' => 'fieldset',
+      '#title' => t('Content types'),
+      '#collapsible' => TRUE,
+      '#collapsed' => TRUE,
+    );
+    $form['category']['content_types']['nodes'] = array(
+      '#type' => 'checkboxes',
+      '#title' => t('Content types'),
+      '#default_value' => $node->category['nodes'],
+      '#options' => array_map('check_plain', node_get_types('names')),
+      '#description' => t('Select content types to categorize using this container.'),
+    );
+
+    $category_type_options = _category_category_type_options(empty($node->nid) ? 0 : $node->nid);
+    if (count($category_type_options) == 1) {
+      // Hide the "default content type for new categories" selector, if there's
+      // only just one option available.
+      $form['category']['content_types']['default_category_type'] = array(
+        '#type' => 'value',
+        '#value' => key($category_type_options),
+      );
+    }
+    else {
+      $form['category']['content_types']['default_category_type'] = array(
+        '#type' => 'select',
+        '#title' => t('Default content type for new categories'),
+        '#default_value' => isset($node->category['default_category_type']) ? $node->category['default_category_type'] : 'category',
+        '#options' => $category_type_options,
+        '#description' => t('Choose the content type to use when creating a new category without full user input, such as freetagging categories, or legacy Taxonomy operations.'),
+        '#required' => TRUE,
+      );
+    }
+
+    $form['category']['tagging'] = array(
+      '#type' => 'fieldset',
+      '#title' => t('Tagging'),
+      '#collapsible' => TRUE,
+      '#collapsed' => TRUE,
+    );
+    $form['category']['tagging']['tags'] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Tags'),
+      '#default_value' => $node->category['tags'],
+      '#description' => t('Categories in this container are created by users when submitting posts by typing a comma separated list. Default content type selected for this container will be used for these newly created categories.'),
+    );
+    $form['category']['tagging']['multiple'] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Multiple select'),
+      '#default_value' => $node->category['multiple'],
+      '#description' => t('Allows posts to have more than one category from this container (always true for tags).'),
+    );
+    $form['category']['tagging']['required'] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Required'),
+      '#default_value' => $node->category['required'],
+      '#description' => t('At least one category in this container must be selected when submitting a post.'),
+    );
+
+    // Distant parent settings
+    $form['category']['distant'] = array(
+      '#type' => 'fieldset',
+      '#title' => t('Allowed parents'),
+      '#collapsible' => TRUE,
+      '#collapsed' => TRUE,
+    );
+    $form['category']['distant']['allowed_parent'] = array(
+      '#type' => 'select',
+      '#title' => t('Allowed parent container'),
+      '#default_value' => (!empty($node->category['allowed_parent']) ?
+      $node->category['allowed_parent'] : array(0)),
+      '#options' => _category_form_distant_options($nid),
+      '#required' => TRUE,
+      '#description' => t('Specifies the container whose categories the categories in this container can have as parents. Leave as \'none\' if you only want categories in this container to have local parents. A category can only have distant categories as its parents, not distant containers. However, a category can have this container, and other categories in this container, as local parents.')
+    );
+
+    // Disable "related categories" by default.
+    $form['category']['relations'] = array(
+      '#type' => 'value',
+      '#value' => 0,
+    );
+    // Disable "synonyms" by default.
+    $form['category']['synonyms'] = array(
+      '#type' => 'value',
+      '#value' => 0,
+    );
+  }
+
+  if (!$is_container) {
+    $form['category']['advanced'] = array(
+      '#type' => 'fieldset',
+      '#title' => t('Advanced options'),
+      '#collapsible' => TRUE,
+      '#collapsed' => TRUE,
+    );
+    $default_relations = array_keys(
+    category_get_related($node->category['cid']));
+    $form['category']['advanced']['relations'] = _category_category_select(t('Related categories'), 'relations', (!empty($default_relations) ? $default_relations : array(0)), $node->category['original_container'], NULL, 1, '<'. t('none') .'>', array($node->category['cid']));
+    $form['category']['advanced']['synonyms'] = array(
+      '#type' => 'textarea',
+      '#title' => t('Synonyms'),
+      '#default_value' => implode("\n", category_get_synonyms($node->category['cid'])),
+      '#description' => t('Synonyms of this category, one synonym per line.'),
+    );
+  }
+}
+
+/**
+ * Determines whether or not to display a node listing for the specified
+ * category or container, and how to display it. Gets the rendered node
+ * listing if appropriate.
+ *
+ * @param $category
+ *   An object representing the category or container.
+ *
+ * @return
+ *   Rendered node listing, or FALSE if no listing should be displayed.
+ */
+function category_node_listing($node) {
+  $is_container = empty($node->category['cnid']);
+  $show_nodes = FALSE;
+  $category_display = NULL;
+
+  if (!module_exists('category_display')) {
+    if ($is_container) {
+      if ($node->category['depth']) {
+        $show_nodes = TRUE;
+      }
+    }
+    else {
+      $show_nodes = TRUE;
+    }
+  }
+  else {
+    $category_display = isset($node->category_display['cid']) ? (object) $node->category_display : (!empty($node->category) ?  category_display_get_container($node->category['cnid']) : NULL);
+    if (!empty($category_display) && $category_display->show_listing) {
+      if ($is_container) {
+        if ($node->category['depth']) {
+          $show_nodes = TRUE;
+        }
+      }
+      else {
+        $show_nodes = TRUE;
+      }
+    }
+  }
+
+  if ($show_nodes) {
+    drupal_add_feed(url('node/'. $node->nid .'/feed'), 'RSS - '. $node->title);
+
+    $use_views = FALSE;
+    if (module_exists('category_views')) {
+      $use_views = category_views_is_visible($node);
+    }
+
+    if ($use_views) {
+      return category_views_render_nodes($node);
+    }
+    else {
+      $nodes = category_select_nodes(array($node->category['cid']), 'or', $node->category['depth'], TRUE, TRUE);
+      return category_render_nodes($nodes, $category_display);
+    }
+  }
+
+  return FALSE;
+}
+
+/**
+ * Implementation of hook_help().
+ */
+function category_help($path, $arg) {
+  switch ($path) {
+    case 'admin/help#category':
+      $output = '<p>'. t('The category module lets you create structured, multi-page hypertexts such as site resource guides, manuals, and Frequently Asked Questions (FAQs). Each page that you create is also a category, and the module allows you to categorize content with these categories, using various systems of classification. Each category belongs to a container, which is used to group a set of categories, and to control the behavior of those categories. Free-tagging containers hold categories that are created by users on the fly when they submit posts (as commonly found in blogs and social bookmarking applications). Controlled containers allow for administrator-defined short lists of categories, as well as complex hierarchies with multiple relationships between different pages. These methods can be applied to different content types and combined together to create a powerful and flexible method of classifying and presenting your content.') .'</p>';
+      $output .= '<p>'. t('The category module combines the features of the book and taxonomy modules in Drupal core, as well as adding additional functionality of its own. In contrast to the book and taxonomy modules, the category module creates categories as nodes. That is, a category is itself an actual piece of content on your site. This means that you can structure pages on your site, and that if you so choose, you can re-use that same set of pages for categorizing other items of content. Your categorization hierarchy and your page hierarchy can become one and the same, allowing for better integration between the pages on your site, and for a smoother navigational experience. The \'categories as content\' approach also has the advantage that you can do anything with your categories, that you can do with any other content item. For example, you can comment on your categories, you can set up versioning for your categories, and you can utilize your categories through contributed modules such as <a href="@views">Views</a> and <a href="@cck">CCK.</a>', array('@views' => 'http://drupal.org/project/views', '@cck' => 'http://drupal.org/project/cck')) .'</p>';
+      $output .= '<p>'. t('For more information, see the <a href="@category">Category module</a> web site.', array('@category' => 'http://category.greenash.net.au/')) .'</p>';
+      return $output;
+    case 'admin/content/category':
+      if (isset($_REQUEST['op'])) {
+        return;
+      }
+      $output = '<p>'. t("The category module offers a means to organize a collection of related pages, and it allows you to categorize your content using these same pages. It is a flexible tool both for classifying dynamic content, and for creating and reviewing structured content. The module has many advanced features, including all the features of the book and taxonomy modules in Drupal core. To begin, create a 'Container' to hold one set of categories. You can create your categories as a hierarchical collection within a container. You can create a container with free-tagging categories, or with administrator-controlled categories to define the various properties of your content, for example 'Countries' or 'Colors'.") .'</p>';
+      $output .= '<p>'. t('Use the list below to configure and review the containers defined on your site, and to manage the categories they contain. A container may (optionally) be tied to specific content types as shown in the <em>Type</em> column and, if so, will be displayed when creating or editing posts of that type. Multiple containers tied to the same content type will be displayed in the order shown below. To change the order of a container, grab a drag-and-drop handle under the <em>Name</em> column and drag it to a new location in the list. (Grab a handle by clicking and holding the mouse while hovering over a handle icon.) Remember that your changes will not be saved until you click the <em>Save</em> button at the bottom of the page.') .'</p>';
+      return $output;
+    case 'admin/content/category/wrappers':
+      $output = '<p>'. t('You can install and uninstall the taxonomy and book wrapper modules using the links below. It is very important that you have taxonomy or book (original or wrapper, whichever is installed) <strong>enabled</strong> on the <a href="@module-admin-page">module administration page</a> before performing an install or uninstall. Additionally, you should make sure that your web server has write permission on the file system, or the scripts may be denied access to rename the necessary files.', array('@module-admin-page' => url('admin/build/modules'))) .'</p>';
+      $output .= '<p>'. t('When performing an install, the scripts will look for the <code>modulename.module.php</code>, <code>modulename.info.php</code> and <code>modulename.install.php</code> files in the <code>wrappers/modulename</code> directory (in your category package), and it will rename them respectively to <code>modulename.module</code>, <code>modulename.info</code> and <code>modulename.install</code>. It will then update Drupal\'s module registry so that the new files are discovered. The reverse will happen when performing an uninstall. The script will determine the correct location of all necessary files automatically, based on where you have installed the category module.') .'</p>';
+      $output .= '<p>'. t('After the operation that you invoke is completed, you will be returned to this page.') .'</p>';
+      return $output;
+    case 'admin/content/category/%':
+      $container = category_get_container($arg[3]);
+      if ($container->tags) {
+        return '<p>'. t('%capital_name is a free-tagging container. To change the name or description of a category, click the <em>edit</em> link next to the category.', array('%capital_name' => drupal_ucfirst($container->title))) .'</p>';
+      }
+      if ($container->allowed_parent) {
+        return '<p>'. t('%capital_name is a distant-parent container. You may organize the categories in the %name container by using the handles on the left side of the table. To change the name or description of a category, click the <em>edit</em> link next to the category.', array('%capital_name' => drupal_ucfirst($container->title), '%name' => $container->title)) .'</p>';
+      }
+      switch ($container->hierarchy) {
+        case 0:
+          return '<p>'. t('%capital_name is a flat container. You may organize the categories in the %name container by using the handles on the left side of the table. To change the name or description of a category, click the <em>edit</em> link next to the category.', array('%capital_name' => drupal_ucfirst($container->title), '%name' => $container->title)) .'</p>';
+        case 1:
+          return '<p>'. t('%capital_name is a single hierarchy container. You may organize the categories in the %name container by using the handles on the left side of the table. To change the name or description of a category, click the <em>edit</em> link next to the category.', array('%capital_name' => drupal_ucfirst($container->title), '%name' => $container->title)) .'</p>';
+        case 2:
+          return '<p>'. t('%capital_name is a multiple hierarchy container. To change the name or description of a category, click the <em>edit</em> link next to the category. Drag and drop of multiple hierarchies is not supported, but you can re-enable drag and drop support by editing each category to include only a single parent.', array('%capital_name' => drupal_ucfirst($container->title))) .'</p>';
+      }
+  }
+}
+
+/**
+ * Helper function for array_map purposes.
+ */
+function _category_get_cid_from_category($category) {
+  return $category->cid;
+}
+
+/**
+ * Implode a list of tags of a certain container into a string.
+ */
+function category_implode_tags($tags, $cnid = NULL) {
+  $typed_tags = array();
+  foreach ($tags as $tag) {
+    // Extract terms belonging to the vocabulary in question.
+    if (is_null($cnid) || $tag->cnid == $cnid) {
+
+      // Commas and quotes in tag names are special cases, so encode 'em.
+      if (strpos($tag->title, ',') !== FALSE || strpos($tag->title, '"') !== FALSE) {
+        $tag->title = '"'. str_replace('"', '""', $tag->title) .'"';
+      }
+
+      $typed_tags[] = $tag->title;
+    }
+  }
+  return implode(', ', $typed_tags);
+}
+
+/**
+ * Determines if the specified parent is the same as the specified container.
+ * If so, then it is the root parent for categories in that container.
+ *
+ * @param $parent
+ *   The node ID of a category or container.
+ * @param $cnid
+ *   The node ID of a container.
+ *
+ * @return
+ *   TRUE if $parent is a container, and if it matches $cnid. FALSE otherwise.
+ */
+function category_is_root_parent($parent, $cnid) {
+  $first_parent = category_get_category($parent);
+  return (empty($first_parent->cnid) && $first_parent->cid == $cnid);
+}
+
+/**
+ * Determines whether or not the specified wrapper is enabled.
+ *
+ * @param $type
+ *   The wrapper to check. Either 'taxonomy', or 'book'. Default is 'taxonomy'.
+ *
+ * @return
+ *   Boolean value indicating status of the specified wrapper.
+ */
+function category_get_wrapper_status($type = 'taxonomy') {
+  return module_exists($type) && function_exists($type .'_wrapper_is_enabled');
+}
+
+/**
+ * Expand depth elements into selects.
+ */
+function _category_form_depth_options($delta) {
+  $depths[-1] = t('Infinite');
+  for ($n = 0; $n <= $delta; $n++) {
+    $depths[$n] = $n;
+  }
+  return $depths;
+}
+
+/**
+ * Form options for selecting the 'allowed parent' setting of a container.
+ */
+function _category_form_distant_options($nid) {
+  $distant = array(
+    0 => '<'. t('none'). '>',
+  );
+  foreach (category_get_containers() as $key => $value) {
+    $distant[$key] = !empty($value->admin_title) ? $value->admin_title : $value->title;
+  }
+  if ($nid != 'new') {
+    unset($distant[$nid]);
+  }
+
+  return $distant;
+}
+
+/**
+ * Checkbox options for the 'allowed containers' setting of a node type with
+ * category behavior.
+ */
+function _category_allowed_containers_options() {
+  $options = array();
+
+  foreach (category_get_containers() as $cid => $container) {
+    $options[$cid] = $container->title;
+  }
+
+  return $options;
+}
+
+/**
+ * Turns the return value of category_get_parents() into a simple array,
+ * where both the keys and the values of each element are the node IDs of
+ * the parent categories.
+ */
+function _category_flatten_parents($parents) {
+  $parents_array = array();
+
+  if (!empty($parents) && is_array($parents)) {
+    foreach ($parents as $key => $parent) {
+      if (!empty($parent->cid)) {
+        $parents_array[$parent->cid] = $parent->cid;
+      }
+    }
+  }
+
+  return $parents_array;
+}
+
+/**
+ * Helps prepare the select box for assigning categories to nodes.
+ */
+function _category_category_select($title, $name, $value, $container_id, $description, $multiple, $blank, $exclude = array(), $parents = NULL) {
+  $tree = array();
+
+  if (!isset($parents)) {
+    $tree = category_get_tree($container_id);
+  }
+  else {
+    foreach ($parents as $parent) {
+      $tree = array_merge($tree, category_get_tree($container_id, $parent, -1, 1, TRUE));
+    }
+  }
+  $options = array();
+
+  if ($blank) {
+    $options[0] = $blank;
+  }
+  if ($tree) {
+    foreach ($tree as $category) {
+      if (!in_array($category->cid, $exclude)) {
+        $options[$category->cid] = str_repeat('-', $category->depth) . $category->title;
+      }
+    }
+  }
+
+  return array(
+    '#type' => 'select',
+    '#title' => $title,
+    '#default_value' => $value,
+    '#options' => $options,
+    '#description' => $description,
+    '#multiple' => $multiple,
+    '#size' => $multiple ? min(9, count($options)) : 0,
+    '#weight' => -15,
+    '#theme' => 'category_category_select',
+  );
+}
+
+function _category_filter_pick_elements($categories) {
+  foreach ($categories as $key => $value) {
+    if (preg_match('/^[0-9]+\-pick$/', $key)) {
+      unset($categories[$key]);
+    }
+  }
+
+  return $categories;
+}
+
+/**
+ * Format the selection field for choosing categories
+ * (by deafult the default selection field is used).
+ *
+ * @ingroup themeable
+ */
+function theme_category_category_select($element) {
+  return theme('select', $element);
+}

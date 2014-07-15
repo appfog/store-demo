@@ -1,0 +1,227 @@
+<?php
+// $Id: category_views.module,v 1.10 2009/12/02 00:29:44 jaza Exp $
+
+/**
+ * @file
+ * Allows node listings on category pages to be rendered using a view.
+ */
+
+/**
+ * Implementation of hook_help().
+ */
+function category_views_help($path, $arg) {
+  switch ($path) {
+    case 'admin/help#category_views':
+      return t('<p>The category_views module renders node listings on category pages using a view. It requires the category module and the views module to be installed.</p>');
+  }
+}
+
+/**
+ * Implementation of hook_nodeapi().
+ */
+function category_views_nodeapi(&$node, $op, $teaser = NULL, $page = NULL) {
+  switch ($op) {
+    case 'load':
+      $behavior = variable_get('category_behavior_'. $node->type, 0);
+      if (!empty($behavior)) {
+        // This is a container or category. Load the view settings from database.
+        // No category information is available in the $node object yet.
+        $cache_key = 'cview_node_load';
+        $output = category_cache_op('get', $node->nid, $cache_key);
+        if (!isset($output)) {
+          $output = array();
+          if ($behavior === 'container') {
+            $result = db_query('SELECT view_for_cats, view_for_cont FROM {category_views} WHERE cid = %d', $node->nid);
+          }
+          else {
+            $result = db_query('SELECT v.view_for_cats, v.view_for_cont FROM {category_views} v INNER JOIN {category} c ON v.cid = c.cnid WHERE c.cid = %d', $node->nid);
+          }
+          $output['category_views'] = db_fetch_array($result);
+          category_cache_op('set', $node->nid, $cache_key, $output);
+        }
+        return $output;
+      }
+      break;
+
+    case 'insert':
+    case 'update':
+      $behavior = variable_get('category_behavior_'. $node->type, 0);
+      if ($behavior === 'container') {
+        // This is a container. Insert or update view settings in database.
+        $old_entry = db_fetch_array(db_query('SELECT * FROM {category_views} WHERE cid = %d', $node->nid));
+        if (!empty($old_entry)) {
+          db_query("UPDATE {category_views} SET view_for_cats = '%s', view_for_cont = '%s' WHERE cid = %d", $node->category_views['view_for_cats'], $node->category_views['view_for_cont'], $node->nid);
+        }
+        else {
+          db_query("INSERT INTO {category_views} (cid, view_for_cats, view_for_cont) VALUES (%d, '%s', '%s')", $node->nid, $node->category_views['view_for_cats'], $node->category_views['view_for_cont']);
+        }
+      }
+      break;
+
+    case 'delete':
+      $behavior = variable_get('category_behavior_'. $node->type, 0);
+      if ($behavior === 'container') {
+        // This is a container being deleted. Delete view settings from database.
+        db_query('DELETE FROM {category_views} WHERE cid = %d', $node->nid);
+      }
+      break;
+  }
+}
+
+/**
+ * Implementation of hook_form_alter().
+ */
+function category_views_form_alter(&$form, $form_state, $form_id) {
+  if (isset($form['type']) && isset($form['#node']) && $form['type']['#value'] .'_node_form' == $form_id) {
+    $node = $form['#node'];
+    if (isset($node->category) && $node->category['behavior'] === 'container') {
+
+      // Add views settings to container node form.
+      $form['category']['view'] = array(
+        '#type' => 'fieldset',
+        '#title' => t('Category views settings'),
+        '#collapsible' => TRUE,
+        '#collapsed' => TRUE,
+        '#weight' => 8,
+        '#description' => t('Choose the views to replace default node listings on category and/or container pages. If there are no views available, or if the currently available views are not adequate, you can <a href="@url">create a new view</a> (<em>warning:</em> clicking this link may cause you to leave this page, and to lose whatever information you have entered so far).', array('@url' => url('admin/build/views/add'))),
+      );
+      $form['#submit'][] = 'category_views_node_form_submit';
+      $view_list = array(0 => '<'. t('none') .'>') + category_views_get_views();
+
+      $form['category']['view']['view_for_cont'] = array(
+        '#type' => 'select',
+        '#title' => t('View for this container'),
+        '#default_value' => isset($node->category_views['view_for_cont']) ? $node->category_views['view_for_cont'] : 0,
+        '#options' => $view_list,
+        '#multiple' => FALSE,
+        '#description' => t('The view to use for rendering listings of assigned nodes on this container\'s page. Recommendation: The view should use the <em>Taxonomy: Vocabulary ID</em> argument, in order to pick correct nodes for this container.'),
+      );
+
+      $form['category']['view']['view_for_cats'] = array(
+        '#type' => 'select',
+        '#title' => t('View for categories in this container'),
+        '#default_value' => isset($node->category_views['view_for_cats']) ? $node->category_views['view_for_cats'] : 0,
+        '#options' => $view_list,
+        '#multiple' => FALSE,
+        '#description' => t('The view to use for rendering listings of assigned nodes on pages for categories in this container. Recommendation: The view should use the <em>Taxonomy: Term ID</em> argument, in order to pick correct nodes for these categories.'),
+      );
+    }
+  }
+}
+
+/**
+ * Additional form submit handler for node forms.
+ *
+ * Converts the $form_state['values']['category']['view'] array
+ * so that it will be merged back into node object.
+ */
+function category_views_node_form_submit($form, &$form_state) {
+  if (isset($form_state['values']['category']['view']['view_for_cats'])) {
+    $form_state['values']['category_views']['view_for_cats'] = $form_state['values']['category']['view']['view_for_cats'];
+  }
+  if (isset($form_state['values']['category']['view']['view_for_cont'])) {
+    $form_state['values']['category_views']['view_for_cont'] = $form_state['values']['category']['view']['view_for_cont'];
+  }
+  unset($form_state['values']['category']['view']);
+}
+
+/**
+ * Implementation of hook_category_legacy().
+ */
+function category_views_category_legacy($op, &$vocabularies, $edit = NULL) {
+  switch ($op) {
+    case 'import_taxonomy_prepare':
+    case 'import_book_prepare':
+      foreach ($vocabularies as $vid => $vocab) {
+        $fields = array('view_for_cats', 'toc_for_cats', 'view_display');
+        foreach ($fields as $field) {
+          if ($field == 'view_display') {
+            $vocabularies[$vid][$field]['cont'] = $edit[$field]['cont'] ? 1 : 0;
+            $vocabularies[$vid][$field]['cat'] = $edit[$field]['cat'] ? 1 : 0;
+          }
+          else {
+            $vocabularies[$vid][$field] = $edit[$field];
+          }
+        }
+      }
+      break;
+  }
+}
+
+/**
+ * Fetches a list of all views usable for 'default' display.
+ *
+ * @return
+ *   An array of views, where each key is the view's name, and each value is its
+ *   description (not its title).
+ */
+function category_views_get_views() {
+  $views = array();
+
+  // Get a list of all displays for all enabled views through the API, by searching
+  // for 'handler' setting, which is always there. We can't get the list directly
+  // from database, because some views may be stored in hook_views_default_views()
+  // implementations instead. (Views documentation suggests this practice for site
+  // specific modules too.)
+  $all_views = views_get_applicable_views('handler');
+  // Get only 'default' display for each view, and build form options including
+  // descriptions and tags.
+  foreach ($all_views as $result) {
+    list($view, $id) = $result;
+    if ($id == 'default') {
+      $views[$view->name] = $view->description . ($view->tag ? ' ('. $view->tag .')' : '');
+    }
+  }
+
+  return $views;
+}
+
+/**
+ * Determine whether or not a view should be used for rendering the listing
+ * of the specified node. This is called directly from category.module.
+ *
+ * @param $node
+ *   The node being displayed.
+ * @param $type
+ *   The type of the node.
+ *
+ * @return
+ *   Boolean TRUE if a view should be used, FALSE otherwise.
+ */
+function category_views_is_visible($node, $type = NULL) {
+  if ($node->category['behavior'] === 'container' && $node->category_views['view_for_cont']) {
+    return TRUE;
+  }
+  elseif ($node->category['behavior'] === 'category' && $node->category_views['view_for_cats']) {
+    return TRUE;
+  }
+  return FALSE;
+}
+
+/**
+ * Retrieves a themed view of the specified category node.
+ * This is called directly from category.module.
+ *
+ * @param $node
+ *   The category or container for which to generate the view output.
+ *
+ * @return
+ *   A node listing for the specified category, themed for embedding within
+ *   another page (such as a category page).
+ */
+function category_views_render_nodes($node) {
+  if ($node->category['behavior'] === 'container') {
+    $view_name = $node->category_views['view_for_cont'];
+  }
+  else {
+    $view_name = $node->category_views['view_for_cats'];
+  }
+  // We cannot use the simple views_embed_view() function, because the Exposed
+  // filters submit button won't point back to the category node in that case.
+  // We do the same manually here, adding the necessary path override.
+  $view = views_get_view($view_name);
+  if ($view) {
+    $view->override_path = 'node/%';
+    return $view->preview('default', array($node->nid));
+  }
+}

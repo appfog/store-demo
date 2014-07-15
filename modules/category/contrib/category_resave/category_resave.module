@@ -1,0 +1,173 @@
+<?php
+// $Id: category_resave.module,v 1.4 2009/05/31 09:52:08 jaza Exp $
+
+/**
+ * @file
+ * Saves all of the containers, categories and assigned nodes on your site.
+ */
+
+/**
+ * Implementation of hook_help().
+ */
+function category_resave_help($path, $arg) {
+  switch ($path) {
+    case 'admin/help#category_resave':
+    case 'admin/content/category/resave':
+      return '<p>'. t('The category re-save module saves all of the containers, categories and assigned nodes on your site. You can re-save your site\'s category hierarchy per-container, or you can re-save everything in one go. This is useful for refreshing things such as the legacy wrapper data and generated menu items.') .'</p>';
+  }
+}
+
+/**
+ * Implementation of hook_menu().
+ */
+function category_resave_menu() {
+  $items = array();
+
+  $items['admin/content/category/resave'] = array(
+    'title' => 'Re-save categories',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('category_resave_form'),
+    'access arguments' => array('administer categories'),
+    'type' => MENU_LOCAL_TASK,
+  );
+
+  return $items;
+}
+
+/**
+ * Page callback; displays the re-save container selection form.
+ */
+function category_resave_form() {
+  $options = array(0 => '<'. t('all') .'>');
+  foreach (category_get_containers() as $container) {
+    $options[$container->nid] = $container->title;
+  }
+
+  $form['container'] = array(
+    '#type' => 'select',
+    '#title' => t('Container'),
+    '#default_value' => 0,
+    '#options' => $options,
+    '#access' => (bool)$options,
+    '#description' => t('Select a container, and the container along with all its categories and assigned nodes will be re-saved and refreshed. <strong>Warning:</strong> This operation may take a while to complete on large sites.'),
+    '#weight' => -5,
+  );
+  $form['nodes'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Re-save assigned nodes'),
+    '#default_value' => 'nodes',
+    '#description' => t("Uncheck this box, if you want to only re-save your container(s) and categories, without any assigned nodes. <strong>Recommended use:</strong> If you're just refreshing generated menu items for your categories and containers, having menu items for all assigned contents disabled, uncheck this box to save time on large sites. (See your container settings, if you're unsure whether these menu items are enabled or not.) Otherwise leave it checked, to ensure a full refresh."),
+  );
+  $form['submit'] = array('#type' => 'submit',
+    '#value' => t('Go'),
+  );
+
+  return $form;
+}
+
+/**
+ * Form validate callback; checks that the selected container is either '0'
+ * ('all'), or is a valid container ID.
+ */
+function category_resave_form_validate($form, &$form_state) {
+  $validates = TRUE;
+  if (!isset($form_state['values']['container']) ||
+  !is_numeric($form_state['values']['container']) ||
+  $form_state['values']['container'] < 0) {
+    $validates = FALSE;
+  }
+  else if ($form_state['values']['container'] > 0 &&
+  !($container = category_get_container($form_state['values']['container']))) {
+    $validates = FALSE;
+  }
+
+  if (!$validates) {
+    form_set_error('container', t('You must select a valid container (or \'all\').'));
+  }
+}
+
+/**
+ * Form submit handler; starts a batch of required operations.
+ */
+function category_resave_form_submit($form, &$form_state) {
+  $cnid = $form_state['values']['container'];
+  $resave_nodes = !empty($form_state['values']['nodes']);
+
+  if (!is_numeric($cnid)) {
+    return;
+  }
+
+  // Build a batch of all nodes to be processed.
+  $batch = array();
+
+  if (!empty($cnid)) {
+    if ($container = category_get_container($cnid)) {
+      category_resave_container($container, $batch, $resave_nodes);
+    }
+  }
+  else {
+    foreach (category_get_containers() as $container) {
+      category_resave_container($container, $batch, $resave_nodes);
+    }
+  }
+
+  // Execute the batch.
+  batch_set($batch);
+  // batch_process() is not needed here, because we're inside a form
+  // submit handler.
+}
+
+/**
+ * Adds a single container, and all its categories and assigned nodes
+ * to the batch, to be re-saved.
+ */
+function category_resave_container($container, &$batch, $resave_nodes) {
+  $batch['operations'][] = array('category_resave_one', array($container->nid));
+
+  foreach (category_get_tree($container->nid) as $category) {
+    $batch['operations'][] = array('category_resave_one', array($category->cid));
+
+    if ($resave_nodes && !empty($container->nodes)) {
+      $result = db_query('SELECT DISTINCT(n.nid), n.sticky, n.title, n.created FROM {node} n INNER JOIN {category_node} cn ON n.nid = cn.nid WHERE cn.cid = %d AND n.status = 1', $category->cid);
+      while ($tagged_node = db_fetch_object($result)) {
+        $batch['operations'][] = array('category_resave_one', array($tagged_node->nid));
+      }
+    }
+  }
+
+  $batch['operations'][] = array('category_resave_message', array($container->title));
+}
+
+/**
+ * Re-save a single node, if not processed already. This is a batch operation.
+ */
+function category_resave_one($nid, &$context) {
+
+  // Initialize persistent variables on first entry
+  // Note that we can't use $context['sandbox'], because it gets cleared
+  // in Batch API after each operation.
+  if (!isset($context['results']['processed_now'])) {
+    $context['results']['processed_now'] = 0;
+    $context['results']['processed_nodes'] = array();
+  }
+
+  // Re-save the node, if not processed already
+  if (!isset($context['results']['processed_nodes'][$nid])) {
+    $node = node_load($nid);
+    node_save($node);
+    $context['results']['processed_nodes'][$nid] = TRUE;
+    $context['results']['processed_now']++;
+  }
+}
+
+/**
+ * Print and log a message after finishing one container.
+ * This is a batch operation.
+ */
+function category_resave_message($title, &$context) {
+    drupal_set_message(t('Re-saved %count nodes for container %container.', array('%count' => $context['results']['processed_now'], '%container' => $title)));
+  watchdog('content', 'category: re-saved %count nodes for container %container.', array('%count' => $context['results']['processed_now'], '%container' => $title));
+
+  // Reset counter for next container.
+  $context['results']['processed_now'] = 0;
+}

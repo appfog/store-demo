@@ -1,0 +1,12 @@
+; $Id: category_resave.info,v 1.1 2008/06/14 14:18:46 jaza Exp $
+name = Category re-save
+description = Saves all of the containers, categories and assigned nodes on your site.
+package = Category
+dependencies[] = category
+core = 6.x
+; Information added by drupal.org packaging script on 2009-12-02
+version = "6.x-2.0-rc2"
+core = "6.x"
+project = "category"
+datestamp = "1259716812"
+

@@ -1,0 +1,118 @@
+// $Id: INSTALL.txt,v 1.11 2009/12/02 01:01:21 jaza Exp $
+
+Requirements
+------------
+
+This module requires the corresponding stable version of Drupal.
+No other modules are required beyond that.
+
+
+Installation
+------------
+
+1. If you're installing Category to an existing site, save backup copies
+   of your database and files first. Category module changes a lot of things,
+   and therefore it may be difficult to un-install Category properly later.
+
+2. Copy the category folder and its contents to the appropriate Drupal directory,
+   which is usually sites/all/modules/ or sites/your_site_name/modules/.
+   Drupal should automatically detect it.
+
+3. Go to 'Administer -> Modules' (admin/build/modules) and enable category
+   (and additional modules in the Category group, such as category_menu,
+   category_display, and others, if applicable).
+
+4. If you wish to use taxonomy-dependent Drupal modules (e.g. forum, image,
+   glossary) with this module, you must install the taxonomy wrapper module.
+   There is a script available to perform this installation for you. To
+   run the script, go to 'Administer -> Categories -> Wrapper modules'
+   (admin/content/category/wrappers), and click the 'install now' link
+   for the taxonomy wrapper. If you experience errors with this script (usually
+   due to file system permissions problems), see the instructions for
+   installing the wrapper modules manually (available online).
+
+5. If you wish to use book-dependent Drupal modules (e.g. export_dxml) with
+   this module, you must install the book wrapper module. The procedure for
+   doing this is similar to that for installing the taxonomy wrapper module.
+   To run the book wrapper installation script, go to 'Administer -> Categories
+   -> Wrapper modules' (admin/content/category/wrappers), and click
+   the 'install now' link for the book wrapper. If you experience errors with
+   this script (usually due to file system permissions problems), see the
+   instructions for installing the wrapper modules manually (available online).
+
+6. If you have existing taxonomy terms and vocabularies, or if you have
+   existing book nodes, you can import them as categories and containeris using
+   category_legacy. To do this, go to 'Administer -> Category legacy', and
+   follow the instructions on that page. It is recommended that you enable the
+   taxonomy and book wrappers before performing an import. Additionally, using
+   the taxonomy wrapper with existing taxonomy data is not recommended - either
+   import your existing taxonomy data, disable the taxonomy wrapper, or
+   delete your site's taxonomy data. You are able to leave the book module
+   enabled, and continue to use your book data, if you wish (but as with
+   taxonomy, it is recommended that you disable book).
+
+7. If you're going to install any new taxonomy and/or book dependent modules,
+   it's highly recommended to enable them only after you've installed Category,
+   as well as corresponding wrapper module(s), to avoid the need of
+   category_legacy import. Some modules (such as Forum, Image Gallery,
+   Simplenews and others) are known to create taxonomy structures automatically
+   as a part of their installation process, in a way that's not always fully
+   compatible with the category_legacy import.
+   
+8. Go to 'Administer -> Permissions' (admin/user/permissions) to configure
+   access privileges for this module.
+
+9. Settings for this module are basically located at 'Administer -> Categories'
+   (admin/content/category), but you'll notice that nearly all of the wide
+   range of options are actually set on per-container or per-node-type basis,
+   so you need to visit 'Administer -> Content types -> edit' (admin/content/
+   node-type/your_node_type), and especially your container's edit page, to
+   make all the choices.
+
+10. Go to 'Administer -> Categories' to start managing your categories and
+   containers. You can create new categories and containers from here, or
+   you can go to 'Create content -> Category' or 'Create content -> Container'.
+   As you'll be creating your categories and containers, you can adjust their
+   behavior to your needs through various settings found in the 'Category
+   information' or 'Container information' boxes.
+
+11. You can assign content to categories by configuring your containers to be
+   associated with various node types, and then creating or editing nodes of
+   those types.
+   Note: content with assigned categories will only have its categories
+   displayed, if the taxonomy wrapper is installed, and if category_display
+   is not set to hide them.
+
+12. You may create customized lists of content based on categories, if you
+   have installed the Views module (available at http://drupal.org/project/views),
+   and also use them for your categories through the category_views module.
+   To use Category data with Views, you need to install the taxonomy wrapper,
+   and choose taxonomy-based options in Views.
+
+
+Troubleshooting
+---------------
+
+If something doesn't work as you expected, check all your settings first.
+Most commonly, problems are solved by just reviewing the 'Container information'
+box (while editing the container), as the settings located there are changing
+behavior of all categories (and nodes to some extent) within that container.
+(Note that some settings are hidden, unless other settings make them relevant,
+so you really want to read the descriptions.)
+
+You should also check, whether all necessary modules (such as category_display,
+category_menu, and others) are enabled where needed, and the taxonomy and/or
+book wrapper modules installed if necessary.
+
+If you're experiencing problems with menu items, with taxonomy-based modules,
+or with various content lists (including TOC trees and Views integration),
+you might need to refresh your site's data through the category_resave module.
+(This might happen after larger changes of settings, done while content
+already exists on the site.)
+
+Always keep database backups, if un/installing modules, or performing large
+operations (such as category_resave do), so that you're able to revert the
+changes if something goes wrong.
+
+For further help, visit the sites http://category.greenash.net.au/ and/or
+http://drupal.org/project/category

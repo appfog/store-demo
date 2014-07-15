@@ -1,0 +1,8 @@
+// $Id: CHANGELOG.txt,v 1.2 2005/12/28 13:50:11 jaza Exp $
+
+For a complete list of changes, refer to the category module news page:
+http://category.greenash.net.au/news
+
+29 November 2005
+--------------------------
+- initial release.

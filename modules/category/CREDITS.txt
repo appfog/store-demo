@@ -1,0 +1,14 @@
+// $Id: CREDITS.txt,v 1.5 2006/04/02 07:21:28 jaza Exp $
+
+The category module is maintained by Jeremy Epstein <jazepstein@greenash.net.au>.
+Feel free to contact me, but please search the forums and issues on drupal.org before sending me your queries.
+
+Contributed module maintainers:
+
+Jeremy Epstein:
+- category_outliner
+- category_transform
+- category_views
+
+Dave Cohen:
+- cac_lite

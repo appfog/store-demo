@@ -1,0 +1,14 @@
+; $Id: category_views.info,v 1.2 2009/08/05 04:52:54 jaza Exp $
+name = Category views
+description = Renders node listings on category pages using a view.
+package = Category
+dependencies[] = category
+dependencies[] = views
+core = 6.x
+
+; Information added by drupal.org packaging script on 2009-12-02
+version = "6.x-2.0-rc2"
+core = "6.x"
+project = "category"
+datestamp = "1259716812"
+
