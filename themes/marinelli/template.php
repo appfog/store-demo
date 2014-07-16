@@ -30,7 +30,7 @@ function phptemplate_breadcrumb($breadcrumb) {
   if (!empty($breadcrumb)) {
       $breadcrumb[] = drupal_get_title();
         array_shift($breadcrumb);
-       return '<div class="path"><p><span>'.t('You are here').'</span>'. implode(' / ', $breadcrumb) .'</p></div>';
+       return '<div class="path"><p>'. implode(' / ', $breadcrumb) .'</p></div>';
   }
   }
 
