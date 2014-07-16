@@ -786,11 +786,10 @@ margin-top:0px;
 
 /* og */
 
-
 .og-mission{
 	margin:15px 0 25px 0;
 	padding:15px;
-	}
+}
 	
 .view-og-ghp-ron{
 	margin:25px 0 25px 0;
@@ -798,3 +797,38 @@ margin-top:0px;
 	padding-top:15px;
 	border-top:1px dashed #ccc;
 }
+
+#primary .node .content {
+  text-align: center;
+}
+
+.vehicle-details, .vehicle-description {
+  position: relative;
+  text-align: left;
+  border: 1px solid #ccc;
+  padding: 15px;
+  margin: 0 auto;
+  margin-top: 15px;
+  margin-bottom: 15px;
+}
+
+.vehicle-description {
+  margin-bottom: 100px;
+}
+
+.node .links {
+  display: none;
+}
+
+.add-to-cart {
+  position: absolute;
+  right: 0px;
+  bottom: -40px;
+}
+
+.node .metanode {
+  display:none;
+}
+
+
+
