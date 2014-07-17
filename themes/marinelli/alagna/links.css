@@ -21,7 +21,6 @@ text-decoration:none;
 
 th a,
 #primary .node .content th a{
-	color:white;
 	text-decoration:none;
 	}
 	
@@ -37,11 +36,25 @@ th a,
 text-decoration:none;
 	}
 	
+#primary .node img.preview {
+	float: left;
+}
+
+#primary .node .linksteaser {
+	display: none;
+}
+
 #primary .node .content .book-navigation a:hover{
 color: #005a8c;
 background:none;
 text-decoration:underline;
 	}
+
+
+#primary h2.nodeTitle a {
+	display: none;
+}
+
 
 /*hover state (links in content, block, and front page titles)*/
 #primary .node .content a:hover,
@@ -55,8 +68,6 @@ text-decoration:underline;
 #primary .metanode a:hover,
 #primary .admin a:hover,
 #primary dl dt a:hover{
-background-color:#005a8c;
-color:white;
 text-decoration:none;
 	}
 
@@ -82,12 +93,6 @@ text-decoration:none;
 	text-transform:capitalize;
 	padding:7px 10px 7px 10px;
 	display:block;
-	}
-
-#utilities #plinks ul li a:hover {
-	background: #054b81;
-	color: #fff;
-	text-decoration: none;
 	}
 
 #utilities #plinks ul li a.active,
