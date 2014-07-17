@@ -1,0 +1,12 @@
+name = SendGrid Integration
+description = Provides sendgrid support
+
+core = 6.x
+package = Mail
+
+; Information added by drupal.org packaging script on 2013-10-01
+version = "6.x-1.x-dev"
+core = "6.x"
+project = "sendgrid_integration"
+datestamp = "1380627188"
+
